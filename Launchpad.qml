@@ -81,37 +81,59 @@ Item {
   // Omarchy's current wallpaper, read through the same state symlink its own
   // background plugin uses. Following the link rather than the theme directory
   // means a theme switch is picked up with no reload.
-  // Resolved with `readlink -f`, not read through the symlink. The link's PATH
-  // never changes; its TARGET moves when the theme changes AND when the
-  // background changes within a theme. QtQuick caches images by URL, so a
-  // stable URL means the first wallpaper is decoded once and stays for the life
-  // of the session -- which is what the bug looked like.
+  // The wallpaper is loaded through Omarchy's state symlink -- the same fixed
+  // pathname as before, and the ONLY pathname this plugin ever hands to an
+  // image loader. What changes is a cache token appended as a query, because
+  // the link's path is stable while its target moves (on a theme switch, and on
+  // a background switch within a theme) and QtQuick caches images by URL. Qt
+  // strips a query before opening a local file but keeps it in the cache key.
   //
-  // An earlier fix keyed the URL on the theme name. That covered a theme switch
-  // and missed a background switch, because `theme.name` does not change when
-  // only the picture does. The resolved path covers both, because it IS what
-  // changed.
-  //
-  // Resolved when this opens, not on a timer: the wallpaper is only on screen
-  // while this is open, so that is the only moment it has to be right. Idle
-  // costs nothing.
-  property string wallpaperPath: ""
+  // An earlier version of this fix resolved the link and used the RESOLVED PATH
+  // as the source. That was wrong in the same way the icon lookup was: a
+  // pathname that something else controls should never reach an image loader,
+  // and bounding the string does not bound what it points at. Reported in
+  // review. Now the helper returns a token and nothing else; it cannot steer
+  // what gets opened.
+  readonly property string wallpaperLink:
+      Quickshell.env("HOME") + "/.local/state/omarchy/current/background"
+  property string wallpaperToken: ""
   readonly property string wallpaperSource:
-      root.wallpaperPath.length > 0 ? "file://" + root.wallpaperPath : ""
+      "file://" + root.wallpaperLink
+      + (root.wallpaperToken.length > 0
+         ? "?v=" + encodeURIComponent(root.wallpaperToken) : "")
 
   function refreshWallpaper() {
-    if (!wallpaperLink.running)
-      wallpaperLink.running = true
+    if (!wallpaperProbe.running) {
+      wallpaperProbe.running = true
+      probeWatchdog.restart()
+    }
   }
 
   Process {
-    id: wallpaperLink
-    command: ["readlink", "-f",
-              Quickshell.env("HOME") + "/.local/state/omarchy/current/background"]
+    id: wallpaperProbe
+    // Absolute interpreter, and a minimal environment: a bare command name
+    // would be resolved through whatever PATH this process inherited, so a
+    // shadowed executable would be run automatically by a plugin that is
+    // mounted for the whole session.
+    command: ["/bin/sh", root.pluginDir + "/bin/wallpaper-token"]
+    clearEnvironment: true
+    environment: ({ "HOME": Quickshell.env("HOME") })
     stdout: StdioCollector {
-      onStreamFinished: root.wallpaperPath = String(text || "").trim().slice(0, 4096)
+      // The helper prints one short line; the cap is belt and braces.
+      onStreamFinished: root.wallpaperToken = String(text || "").trim().slice(0, 128)
     }
   }
+
+  // A deadline. The helper only stats a file, but nothing that runs
+  // automatically in a long-lived process should be able to hang without one.
+  Timer {
+    id: probeWatchdog
+    interval: 2000
+    onTriggered: if (wallpaperProbe.running) wallpaperProbe.running = false
+  }
+
+  readonly property string pluginDir:
+      Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
 
   Component.onCompleted: root.refreshWallpaper()
 
@@ -471,11 +493,12 @@ Item {
         anchors.fill: parent
         source: root.wallpaperSource
         fillMode: Image.PreserveAspectCrop
-        // Loaded synchronously on purpose: asynchronous loading painted the
-        // icon grid first and blurred the background a beat later, which read
-        // as the window opening in two steps. A local JPEG costs a few ms, and
-        // being mounted it is paid once rather than per opening.
-        asynchronous: false
+        // Asynchronous, despite the two-step open it causes. The helper checks
+        // the target is a bounded regular file, but it cannot hold it: the link
+        // can be replaced between that check and this load. Decoding off the
+        // main thread means the worst case is a late or missing background
+        // rather than a shell that stops answering.
+        asynchronous: true
         cache: true
         visible: false
       }

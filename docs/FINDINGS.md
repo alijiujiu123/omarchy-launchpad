@@ -464,3 +464,37 @@ Preloading the icons at mount was also tried and also hung the shell, for a
 different reason: thirty icon lookups during the root object's construction
 delay IPC registration past the point anything waits for it. If it is revisited,
 it has to be deferred until after startup.
+
+## 18. A token, not a path
+
+The first wallpaper fix resolved the state symlink with `readlink -f` and used
+the **resolved path** as the `Image` source. Review found two problems with it,
+both correct:
+
+- `readlink` was invoked by bare name, so it resolved through whatever `PATH`
+  this process inherited. A shadowed executable would then be run automatically
+  by a plugin that is mounted for the whole session.
+- The resolved path was accepted after a length slice and handed to a
+  synchronous `Image`. A replaced link can resolve to a FIFO, a device node or
+  an adversarial file, and **bounding a pathname does not bound what it points
+  at** — the same mistake as the icon lookup, in a different place.
+
+The fix is not more validation on the path. It is **not having a path**. The
+image is loaded through Omarchy's fixed `current/background` link — the same
+pathname as the original code, and the only one this plugin ever gives an image
+loader. The helper returns a short **cache token** (size and basename) appended
+as a query, purely so the URL changes when the picture does. Nothing the helper
+prints can steer what gets opened.
+
+The helper is hardened as asked: an absolute `/bin/sh`, `clearEnvironment` with
+only `HOME`, a 2s watchdog, and bounded output. It refuses to print anything
+unless the target is a regular file (`[ -f ]`, which is false for a FIFO,
+socket, device or directory) under 64 MB — and no output means no token change,
+which means no reload. Failing closed is the safe direction.
+
+The image also became `asynchronous: true`, giving up the single-step open the
+comment there used to defend. The helper checks the target but cannot *hold* it:
+the link can be replaced between the check and the load. Decoding off the main
+thread means the worst case is a late or missing background rather than a shell
+that stops answering — which is exactly what a livelock looked like earlier
+today, and is worth not repeating deliberately.

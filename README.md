@@ -118,11 +118,12 @@ with Omarchy.
 - `uwsm-app` and `gtk-launch`, used to start the application you pick. Both come
   with Omarchy. Going through `uwsm-app` is what keeps launched apps out of the
   compositor's own systemd scope, which is the same path Omarchy's menu uses.
-- coreutils `readlink`, run once at startup and again on each open to resolve
-  Omarchy's `current/background` symlink to the file it points at. Reading
-  *through* the link would give the right picture but a URL that never changes,
-  and QtQuick caches images by URL — so the first wallpaper would stay after a
-  theme or background switch.
+- a POSIX shell and coreutils `readlink`/`stat`/`basename`, used by the bundled
+  `bin/wallpaper-token`. It runs at startup and on each open, reads nothing but
+  file metadata, and prints a short cache token — never a path. The wallpaper is
+  always loaded through Omarchy's own `current/background` link; the token only
+  exists so the URL changes when the picture behind that link does, because
+  QtQuick caches images by URL and the link's path never changes.
 
 Applications come from `DesktopEntries`, Quickshell's own XDG `.desktop` index,
 so installs and removals are picked up live with no watcher and no cache of our
