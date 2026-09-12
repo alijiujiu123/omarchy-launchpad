@@ -346,3 +346,72 @@ not part of one — and it also fixes the mundane case of a `Name` containing a
 newline breaking the grid layout.
 
 Found by auditing this plugin against its own checklist, not by a reviewer.
+
+## 18. Bounds belong at construction, not at display
+
+The first submission was blocked on this, correctly. The plugin capped every
+label at 128 characters *as it was drawn* and called that bounded. It was not:
+
+- `allApps` accepted an unlimited number of entries
+- it sorted **full, uncapped** `name` strings
+- the search filter lowercased and scanned **full, uncapped** `name` and
+  `genericName` — on every keystroke
+
+So a hostile set of `.desktop` files could consume unbounded memory and CPU in a
+process that stays mounted for the whole session, and the rendered label being
+short changed none of it. **Capping the output does not bound the work done to
+produce it.**
+
+The model now takes one bounded pass: at most **512 entries**, each field capped
+at **128 characters**, at most **128 KB** of retained text, and the lowercase
+search key computed **once** when the record is built rather than per keystroke.
+Overflow stops the loop and raises a flag the grid displays — the resource bound
+is the same either way, but a user whose list is silently short has no way to
+know why.
+
+One honest limit: Quickshell's `DesktopEntries` has already parsed the index
+before this plugin sees it. These bounds govern what the plugin retains and what
+it does per keystroke, which is the part it owns.
+
+## 19. An icon path from a `.desktop` entry is not a trusted path
+
+Also blocked, also correct. `iconFor()` honoured an absolute path when the entry
+supplied one — bounded only by length and a `..` check — and handed it to QML as
+a `file://` URL.
+
+The reasoning behind that was wrong. "It came from a desktop entry" is not a
+provenance: **anything that can write to `~/.local/share/applications` writes
+the entry**, so the path is exactly as untrusted as the id next to it. Handed to
+an image loader it is an arbitrary pathname opened by a session-long process — a
+FIFO or device node that never returns, or a file crafted to exhaust the
+decoder.
+
+There is no way to validate such a path from QML. It cannot stat a file, so it
+cannot tell a regular file from a FIFO, and checking the extension proves
+nothing. So the branch is gone: **`Quickshell.iconPath()` only**, which resolves
+through the icon theme — a lookup in trusted directories rather than a path
+someone handed us. Anything that is not a well-formed theme name gets the
+generic icon.
+
+Measured cost on a 64-entry system: **2 entries** lose their artwork. That is
+what buying the guarantee costs, and it is cheap.
+
+## 20. A conservative grammar can be its own bug
+
+Shape-checking the desktop id had refused anything outside
+`^[A-Za-z0-9][A-Za-z0-9._+-]*$`. Chrome's web-app entries are named
+`Google Maps.desktop` — spaces and all — so **five icons on this machine drew
+perfectly and did nothing when clicked**. The check was introduced as a
+hardening measure and quietly broke a feature; nobody noticed because a launcher
+that does nothing looks exactly like a launcher whose app is slow to start.
+
+A desktop id is a *filename*, and the bound belongs where the hazard is. The
+value only ever reaches an argv array — `execDetached` takes one, so nothing is
+re-tokenized — or Omarchy's own `shellQuote`. Spaces are not a hazard there. A
+path separator is, whatever the quoting, and so are control characters,
+traversal, and a leading dash that could be read as an option. Those are what
+the check refuses now.
+
+**Hardening that silently removes function is a bug, not a trade-off.** It was
+found by counting what the rule would reject before shipping it — which is the
+same measurement that showed the icon change costs two entries.

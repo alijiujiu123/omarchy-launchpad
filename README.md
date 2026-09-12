@@ -160,17 +160,24 @@ A `.desktop` file is not a trusted document — anything that can write to
 `~/.local/share/applications` chooses the name and icon strings, and they arrive
 in a long-lived process that owns the whole shell surface. So:
 
+- **the model is bounded at construction, not at display.** At most 512 entries
+  and 128 KB of retained text; each field is capped at 128 characters and the
+  lowercase search key is computed once, when the record is built. Capping a
+  label as it is *drawn* does nothing for the work already spent counting,
+  sorting and re-filtering an unbounded set on every keystroke — in a process
+  that stays mounted for the whole session. If a limit is reached the model
+  stops consuming and the grid says so rather than quietly showing a short list.
 - every `Text` that shows a name sets `textFormat: Text.PlainText`, because
   QML's default `AutoText` sniffs for HTML and switches to rich text, which
   follows markup into resource handling
-- names are capped at 128 characters at the point of display, not merely elided
-  (eliding still lays the whole string out)
-- an icon value is used as a file path only when the entry gives an absolute one,
-  and as an icon **theme name** only when it looks like one; anything else falls
-  back to the generic icon rather than being sanitised
-- a desktop id is shape-checked before it is launched, and the launch goes
-  through `Quickshell.execDetached` with an argument array — never a shell
-  string
+- names are capped at 128 characters and stripped of control characters
+- **icons resolve through the icon theme only.** No path from a `.desktop` entry
+  ever reaches the image loader: the entry is as untrusted as anything else that
+  can be written into `~/.local/share/applications`, and QML cannot tell a
+  regular file from a FIFO or a device node. Anything that is not a
+  well-formed theme name falls back to the generic icon.
+- a desktop id is shape-checked before it is used, and the launch goes through
+  `Quickshell.execDetached` with an argument array — never a shell string
 
 ## Licence
 

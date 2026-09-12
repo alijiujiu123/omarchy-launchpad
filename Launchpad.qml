@@ -110,30 +110,79 @@ Item {
   }
 
   // --- application model --------------------------------------------------
-  // DesktopEntries is Quickshell's own .desktop index, so this tracks installs
-  // and removals live with no watcher of our own.
-  readonly property var allApps: {
-    const out = [];
+  // DesktopEntries is Quickshell's own .desktop index, so installs and removals
+  // are picked up live with no watcher of our own.
+  //
+  // EVERYTHING IS BOUNDED HERE, at construction, not at display. Capping a
+  // label as it is drawn does nothing for the work already done to get it
+  // there: an unbounded set would still be counted, sorted, lowercased and
+  // re-filtered on every keystroke, inside a process that is mounted for the
+  // whole session. A `.desktop` file is author-controlled -- anything that can
+  // write to ~/.local/share/applications chooses these strings and how many of
+  // them there are -- so the model takes a bounded copy and stops.
+  //
+  // Honest limit of this: Quickshell has already parsed the index by the time
+  // we see it. These bounds govern what this plugin retains and what it does
+  // per keystroke, which is the part it owns.
+  readonly property int maxEntries: 512
+  readonly property int maxFieldLength: 128
+  readonly property int maxCatalogBytes: 131072
+
+  // One pass produces the records AND the overflow flag. A separate binding
+  // that recomputed the same loop to answer "did it overflow" would double the
+  // work it is trying to bound.
+  readonly property var catalog: {
+    const items = [];
     const values = DesktopEntries.applications.values || [];
+    let bytes = 0;
+    let truncated = false;
+
     for (let i = 0; i < values.length; i++) {
+      if (items.length >= root.maxEntries) { truncated = true; break; }
+
       const entry = values[i];
       if (!entry || entry.noDisplay)
         continue;
-      out.push(entry);
+
+      // Bounded before it is looked at, the id check included.
+      const id = String(entry.id || "").slice(0, root.maxFieldLength);
+      if (!root.looksLikeDesktopId(id))
+        continue;
+
+      const name = root.displayLabel(entry.name);
+      if (name.length === 0)
+        continue;
+      const generic = root.displayLabel(entry.genericName);
+      const icon = String(entry.icon || "").slice(0, root.maxFieldLength);
+
+      bytes += id.length + name.length + generic.length + icon.length;
+      if (bytes > root.maxCatalogBytes) { truncated = true; break; }
+
+      items.push({
+        id: id,
+        name: name,
+        icon: icon,
+        // Precomputed once. Lowercasing every name on every keystroke was the
+        // per-character cost the bound is meant to remove.
+        sortKey: name.toLowerCase(),
+        search: (name + " " + generic).toLowerCase()
+      });
     }
-    out.sort((a, b) => String(a.name).toLowerCase().localeCompare(String(b.name).toLowerCase()));
-    return out;
+
+    items.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    return { items: items, truncated: truncated };
   }
 
-  // Typing filters in place, the way Launchpad's search does.
+  readonly property var allApps: root.catalog.items
+  readonly property bool catalogTruncated: root.catalog.truncated
+
+  // Typing filters in place, the way Launchpad's search does. Every field this
+  // touches was bounded and lowercased when the record was built.
   readonly property var apps: {
     const q = root.query.trim().toLowerCase();
     if (q.length === 0)
       return root.allApps;
-    return root.allApps.filter(entry => {
-      return String(entry.name || "").toLowerCase().includes(q)
-          || String(entry.genericName || "").toLowerCase().includes(q);
-    });
+    return root.allApps.filter(entry => entry.search.indexOf(q) !== -1);
   }
 
   readonly property int pageCount: Math.max(1, Math.ceil(root.apps.length / root.perPage))
@@ -180,30 +229,49 @@ Item {
         && value.indexOf("..") === -1;
   }
 
+  // THEME NAMES ONLY. An earlier version honoured an absolute path when the
+  // desktop entry supplied one, on the reasoning that the entry was a local
+  // file the session had installed. That reasoning is wrong: anything that can
+  // write to ~/.local/share/applications writes the entry too, so the path is
+  // as untrusted as the id. Handed to QML as a file:// URL it becomes an
+  // arbitrary pathname opened as an image by a process that is mounted for the
+  // whole session -- a FIFO or device node that never returns, or a file
+  // crafted to exhaust the decoder.
+  //
+  // Quickshell.iconPath resolves through the icon theme, which is a lookup in
+  // trusted directories rather than a path we were handed, so the only value
+  // that can reach the loader is one the theme itself produced. There is no
+  // safe way to validate an arbitrary path from QML -- it cannot stat the file,
+  // so it cannot tell a regular file from a FIFO -- and a generic icon is a
+  // perfectly good answer.
+  //
+  // Cost, measured on a 64-entry system: 2 entries lose their artwork.
   function iconFor(entry) {
     const fallback = Quickshell.iconPath("application-x-executable", true);
     const name = String((entry && entry.icon) || "");
-    if (name.length === 0 || name.length > root.maxIconPathLength)
+    if (!root.looksLikeIconName(name))
       return fallback;
-    if (name.startsWith("/"))
-      return name.indexOf("..") === -1 ? "file://" + name : fallback;
-    if (root.looksLikeIconName(name)) {
-      const themed = Quickshell.iconPath(name, true);
-      if (themed.length > 0)
-        return themed;
-    }
-    return fallback;
+    const themed = Quickshell.iconPath(name, true);
+    return themed.length > 0 ? themed : fallback;
   }
 
-  // A desktop file id is a filename, so it has a filename's shape. Rejecting
-  // anything else keeps a path out of the argument list -- execDetached takes
-  // an array and never goes through a shell, so there is no quoting to get
-  // wrong, but "../../something.desktop" is still not an id.
+  // A desktop file id is a FILENAME, so it is bounded by what a filename may
+  // be -- not by a conservative identifier grammar. Chrome's web-app entries
+  // are named "Google Maps.desktop", spaces and all, and an id grammar that
+  // refused them left five icons on this machine that drew fine and did
+  // nothing when clicked.
+  //
+  // What actually has to be refused: a path separator, traversal, control
+  // characters, and a leading dash that could be read as an option. The value
+  // only ever reaches an argv array (execDetached takes one, so nothing is
+  // re-tokenized) or Omarchy's own shellQuote, so spaces are not a hazard
+  // there; a slash is, whatever the quoting.
   function looksLikeDesktopId(value) {
     return value.length > 0
         && value.length <= 255
-        && /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(value)
-        && value.indexOf("..") === -1;
+        && !/[\u0000-\u001F\u007F\/\\]/.test(value)
+        && value.indexOf("..") === -1
+        && /^[A-Za-z0-9_]/.test(value);
   }
 
   // The shell injects its own AppLibrary, which owns launching and removal for
@@ -230,7 +298,7 @@ Item {
     const id = String((entry && entry.id) || "");
     if (!root.looksLikeDesktopId(id))
       return;
-    const name = root.displayLabel(entry && entry.name);
+    const name = String((entry && entry.name) || "");
     if (root.appLibrary && typeof root.appLibrary.launch === "function")
       root.appLibrary.launch(id, name);
     else
@@ -288,7 +356,7 @@ Item {
       return;
     root.uninstallTarget = {
       id: id,
-      name: root.displayLabel(entry && entry.name),
+      name: String((entry && entry.name) || ""),
       icon: root.iconFor(entry)
     };
   }
@@ -728,7 +796,8 @@ Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: panel.cellW * 0.9
                     horizontalAlignment: Text.AlignHCenter
-                    text: root.displayLabel(tile.modelData.name)
+                    // Already bounded and control-stripped when the record was built.
+                    text: tile.modelData.name
                     textFormat: Text.PlainText
                     color: "#ffffff"
                     font.pixelSize: panel.labelSize
@@ -788,6 +857,21 @@ Item {
             TapHandler { onTapped: pages.currentIndex = index }
           }
         }
+      }
+
+      // Fail loudly rather than quietly showing a partial list. The resource
+      // bound is the same either way -- the model stopped consuming -- but a
+      // user whose grid is silently short has no way to know why.
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Math.round(panel.dotsBand * 0.18)
+        visible: root.catalogTruncated
+        text: "Showing the first " + root.allApps.length
+            + " applications — the rest were not loaded"
+        textFormat: Text.PlainText
+        color: Qt.rgba(1, 1, 1, 0.55)
+        font.pixelSize: Math.max(10, Math.round(panel.labelSize * 0.9))
       }
 
       // --- uninstall confirmation ------------------------------------------
