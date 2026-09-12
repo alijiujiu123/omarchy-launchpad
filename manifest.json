@@ -2,10 +2,12 @@
   "schemaVersion": 1,
   "id": "io.github.andyweiboan.launchpad",
   "name": "Launchpad",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Andy Wei",
   "description": "macOS-style app grid: a full-screen page of icons over the blurred wallpaper, with search and page dots",
-  "kinds": ["overlay"],
+  "kinds": [
+    "overlay"
+  ],
   "keepLoaded": true,
   "entryPoints": {
     "overlay": "Launchpad.qml"

@@ -415,3 +415,52 @@ the check refuses now.
 **Hardening that silently removes function is a bug, not a trade-off.** It was
 found by counting what the rule would reject before shipping it — which is the
 same measurement that showed the icon change costs two entries.
+
+## 16. A stable URL is not a live image
+
+The wallpaper came through `~/.local/state/omarchy/current/background`, a
+symlink whose **target** moves — when the theme changes, and when the background
+changes within a theme. The path is stable, which is exactly the problem:
+QtQuick caches images by URL, so with `cache: true` the first wallpaper was
+decoded once and stayed for the life of the session.
+
+The cache is worth keeping (5K JPEG, ~190ms), so the URL has to change instead.
+`readlink -f` resolves the link and the image is sourced from the real path: no
+cache-busting trick, because the thing in the URL *is* the thing that changed.
+
+An intermediate fix keyed the URL on `current/theme.name` and was verified
+working for a theme switch — and was still incomplete, because the background
+also changes within a theme and that file does not move. **Verifying the case
+that was reported is not the same as verifying the behaviour.**
+
+Resolved on open rather than on a timer: the wallpaper is only on screen while
+the grid is up, so that is the only moment it has to be right.
+
+## 17. `cacheBuffer: 0` livelocks this ListView
+
+Trying to make the grid appear faster, the obvious saving was the lookahead
+page — the ListView builds the next page's 30 delegates and icons at the moment
+the window opens, and nobody is looking at them. Setting `cacheBuffer: 0`
+**hung the entire shell**.
+
+Not crashed: hung. The bar and the dock kept rendering, because the scene graph
+runs on its own thread with the last good state, while every `omarchy-shell`
+command timed out because IPC needs the main thread. "Draws fine, answers
+nothing" reads like broken IPC and is actually a QML livelock.
+
+The cause is the combination already in this ListView: `highlightRangeMode:
+StrictlyEnforceRange` with `snapMode: SnapOneItem` forces the current item to
+sit exactly in range, and with no cache buffer the view creates and destroys
+delegates trying to satisfy that and never settles.
+
+**The experiment had already shown this and was dismissed.** Changing that one
+line alone broke IPC, and the result was explained away as restart flakiness
+because "a ListView property cannot break IPC". Twenty minutes, two killed
+shells and a full plugin bisect later, it was that line. When a clean
+single-variable experiment contradicts intuition, the experiment is the one to
+believe.
+
+Preloading the icons at mount was also tried and also hung the shell, for a
+different reason: thirty icon lookups during the root object's construction
+delay IPC registration past the point anything waits for it. If it is revisited,
+it has to be deferred until after startup.

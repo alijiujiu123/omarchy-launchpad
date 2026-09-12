@@ -25,6 +25,7 @@
 import QtQuick
 import QtQuick.Effects
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 
 Item {
@@ -42,6 +43,8 @@ Item {
   // Called by the shell on summon. The payload is accepted and ignored -- there
   // is only one thing this plugin does -- but the signature is the contract.
   function open(payloadJson) {
+    // The background may have changed since the last open.
+    root.refreshWallpaper()
     root.setShown(true)
   }
 
@@ -78,8 +81,39 @@ Item {
   // Omarchy's current wallpaper, read through the same state symlink its own
   // background plugin uses. Following the link rather than the theme directory
   // means a theme switch is picked up with no reload.
+  // Resolved with `readlink -f`, not read through the symlink. The link's PATH
+  // never changes; its TARGET moves when the theme changes AND when the
+  // background changes within a theme. QtQuick caches images by URL, so a
+  // stable URL means the first wallpaper is decoded once and stays for the life
+  // of the session -- which is what the bug looked like.
+  //
+  // An earlier fix keyed the URL on the theme name. That covered a theme switch
+  // and missed a background switch, because `theme.name` does not change when
+  // only the picture does. The resolved path covers both, because it IS what
+  // changed.
+  //
+  // Resolved when this opens, not on a timer: the wallpaper is only on screen
+  // while this is open, so that is the only moment it has to be right. Idle
+  // costs nothing.
+  property string wallpaperPath: ""
   readonly property string wallpaperSource:
-      "file://" + Quickshell.env("HOME") + "/.local/state/omarchy/current/background"
+      root.wallpaperPath.length > 0 ? "file://" + root.wallpaperPath : ""
+
+  function refreshWallpaper() {
+    if (!wallpaperLink.running)
+      wallpaperLink.running = true
+  }
+
+  Process {
+    id: wallpaperLink
+    command: ["readlink", "-f",
+              Quickshell.env("HOME") + "/.local/state/omarchy/current/background"]
+    stdout: StdioCollector {
+      onStreamFinished: root.wallpaperPath = String(text || "").trim().slice(0, 4096)
+    }
+  }
+
+  Component.onCompleted: root.refreshWallpaper()
 
   // --- state --------------------------------------------------------------
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
