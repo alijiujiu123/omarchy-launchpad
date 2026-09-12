@@ -3,6 +3,8 @@
 A macOS-style application grid for [Omarchy](https://omarchy.org), as a shell
 plugin.
 
+![Launchpad showing a six-by-five grid of application icons over the blurred desktop wallpaper, with a search pill at the top and three page dots at the bottom](preview.png)
+
 A full-screen page of app icons over your own wallpaper, blurred and dimmed,
 with a search pill at the top and page dots at the bottom. Type to filter, swipe
 or scroll to page, click to launch.
