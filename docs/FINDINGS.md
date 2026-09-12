@@ -498,3 +498,48 @@ the link can be replaced between the check and the load. Decoding off the main
 thread means the worst case is a late or missing background rather than a shell
 that stops answering — which is exactly what a livelock looked like earlier
 today, and is worth not repeating deliberately.
+
+## 19. Fast is not the same as coherent
+
+With the wallpaper preloaded the grid opened quickly, and it still looked wrong:
+the application names appeared first and the artwork flickered in underneath
+them. The report was "very fast, but very incoherent" — and the speed was not
+the problem.
+
+Labels are painted immediately; icons load asynchronously, and they have to,
+because a synchronous grid of thirty blocks the open. So each tile now fades in
+as one thing, gated on its own icon's status, over 110ms. A fade rather than a
+switch, so a tile that genuinely arrives late reads as settling rather than
+popping.
+
+The mistake worth naming is the earlier one: the first two attempts at this
+attacked the *duration*, and both failed — preloading at 128px and then at 32px,
+neither of which is the size the grid asks for, so neither was a cache hit at
+all. The icon cache is keyed on URL **and requested size**.
+
+## 20. Preload after startup, never during construction
+
+Warming the cache is the whole point of `keepLoaded`, and it was not being used
+for anything: the engine was ready, nothing else was.
+
+But preloading during the root object's construction **hung the shell**. Thirty
+icon lookups there delayed IPC registration past the point anything waited for
+it: the bar rendered fine and every `omarchy-shell` command timed out. Started
+from a Timer 400ms after mount instead, the same work is invisible.
+
+The remaining case is an open immediately after changing the wallpaper, which
+misses because the token is refreshed on open. Closing that would mean polling
+while idle, which has not been judged worth it.
+
+## 21. One screen, and which one
+
+`Variants` still builds a window per screen — that is what keeps each display
+sizing its own grid — but only the focused one is visible. The monitor is
+resolved **when the grid opens**, after `Hyprland.refreshMonitors()`: a
+keep-loaded plugin can sit idle for hours, and where the user is only matters at
+the moment they ask.
+
+When Hyprland has not reported a focused monitor the name is empty and every
+screen shows it, which is the old behaviour. **Showing it everywhere is a better
+failure than showing it nowhere** — one is redundant, the other looks like the
+keybinding is broken.

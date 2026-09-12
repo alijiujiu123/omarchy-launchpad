@@ -26,6 +26,7 @@ import QtQuick
 import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import Quickshell.Wayland
 
 Item {
@@ -42,7 +43,24 @@ Item {
 
   // Called by the shell on summon. The payload is accepted and ignored -- there
   // is only one thing this plugin does -- but the signature is the contract.
+  // --- which screen -------------------------------------------------------
+  // macOS puts Launchpad on the display you are working on, not on every one at
+  // once. Refreshed on open rather than tracked continuously: a keep-loaded
+  // plugin can sit idle for hours, and the answer only matters at the moment it
+  // is summoned.
+  //
+  // Empty means Hyprland has not told us yet -- in that case every screen shows
+  // it, which is the old behaviour and a better failure than none showing it.
+  property string activeScreen: ""
+
+  function refreshActiveScreen() {
+    Hyprland.refreshMonitors()
+    const monitor = Hyprland.focusedMonitor
+    root.activeScreen = monitor ? String(monitor.name || "") : ""
+  }
+
   function open(payloadJson) {
+    root.refreshActiveScreen()
     // The background may have changed since the last open.
     root.refreshWallpaper()
     root.setShown(true)
@@ -135,7 +153,28 @@ Item {
   readonly property string pluginDir:
       Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
 
-  Component.onCompleted: root.refreshWallpaper()
+  // Decoded before anyone asks, which is the point of being keepLoaded and was
+  // not being used for anything. One Image, never drawn; it exists so the panel
+  // finds the identical URL already in QtQuick's cache and the asynchronous
+  // load completes instantly instead of painting the grid first and the
+  // background a beat later.
+  //
+  // Deliberately NOT started from Component.onCompleted. Preloading during the
+  // root object's construction is what delayed the shell's IPC registration
+  // past the point anything waited for it -- the bar rendered and every command
+  // timed out. A Timer puts this after startup, where nothing is waiting.
+  Image {
+    source: root.wallpaperSource
+    visible: false
+    asynchronous: true
+    cache: true
+  }
+
+  Timer {
+    running: true
+    interval: 400
+    onTriggered: root.refreshWallpaper()
+  }
 
   // --- state --------------------------------------------------------------
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
@@ -457,6 +496,8 @@ Item {
       // Hiding tears down the layer surface but keeps the QML tree and, more to
       // the point, the decoded wallpaper -- which is the 190ms.
       visible: root.shown
+               && (root.activeScreen === ""
+                   || String(panel.modelData.name || "") === root.activeScreen)
 
       // Overlay layer so it covers the bar too, exclusive keyboard focus so
       // typing goes to the search box without a click first. The namespace is
@@ -774,6 +815,18 @@ Item {
                   anchors.centerIn: parent
                   spacing: Math.round(panel.iconSize * 0.14)
 
+                  // The icon and its name appear together or not at all. Icons
+                  // load asynchronously -- they have to, a synchronous grid of
+                  // thirty would block the open -- but the label is painted
+                  // immediately, so without this the names arrive first and the
+                  // artwork flickers in underneath them. Fast, and wrong
+                  // looking: the complaint was never the speed.
+                  //
+                  // A short fade rather than a hard switch, so a tile that does
+                  // arrive late reads as settling rather than popping.
+                  opacity: tileIcon.status === Image.Ready ? 1 : 0
+                  Behavior on opacity { NumberAnimation { duration: 110 } }
+
                   // Bound to the shared phase rather than animated per tile, so
                   // leaving edit mode returns every icon to level with no
                   // per-tile animation to stop. 1.6 degrees is small enough to
@@ -792,6 +845,7 @@ Item {
                     height: panel.iconSize
 
                     Image {
+                      id: tileIcon
                       anchors.fill: parent
                       source: root.iconFor(tile.modelData)
                       sourceSize.width: panel.iconSize

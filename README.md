@@ -67,6 +67,8 @@ thing it asks you to change, and you make that change yourself.
 | Click an icon while jiggling | Leave jiggle mode (it does **not** launch) |
 | `Esc`, click the backdrop | Back out one layer: dialog, then jiggle mode, then Launchpad |
 
+It opens on the display you are working on, not on all of them at once.
+
 Scroll or drag sideways to page; click a page dot to jump. A two-finger
 touchpad scroll in either axis pages too.
 
