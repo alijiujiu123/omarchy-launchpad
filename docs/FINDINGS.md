@@ -218,3 +218,48 @@ libraries):
 opened once so the wallpaper was decoded in both cases. What is saved is the
 duplicated QML engine, scene graph and GPU context — not Launchpad's own data,
 which still exists, just in the other process.
+
+## 12. Jiggle mode, and why the badge is a `MouseArea`
+
+The first version put uninstall on a right-click straight into a confirm dialog.
+It worked and looked wrong — a modal card is a menu's answer to the question,
+and Launchpad's answer is a *mode*. So: hold an icon (450 ms) and the grid
+wobbles with a remove badge on every app, the way macOS does. Right-click enters
+the same mode, because holding a mouse button to edit is not a gesture anyone
+tries on a desktop.
+
+Two things this design has to get right:
+
+- **Anything that is not a badge leaves the mode**, including clicking an icon.
+  Launching out of jiggle mode would mean the click meant to stop editing also
+  started something.
+- **One shared phase drives the whole grid.** Each tile binds
+  `rotation: 1.6 * sin(phase + offset)` with the offset derived from its index,
+  so neighbours are out of step — in lockstep it reads as the grid sliding
+  rather than each icon being loose. Binding rather than animating per tile also
+  means leaving the mode returns every icon to level for free; thirty separate
+  animations would be thirty things to stop, each frozen at whatever angle it
+  had reached.
+
+**The badge must be a `MouseArea`, not a `TapHandler`.** It sits inside the
+tile, which has a `TapHandler` of its own, and pointer handlers *cooperate*
+rather than block — both fire, so clicking the badge also counted as tapping the
+icon and dropped straight back out of edit mode. A `MouseArea` takes the press
+exclusively. This is the same property that made a `MouseArea` the **wrong**
+choice for the backdrop, where a drag still has to reach the `DragHandler`:
+grabbing is the point in one case and the bug in the other.
+
+## 13. Verified end to end
+
+Both removal branches were exercised on a live system:
+
+- a hand-written entry under `~/.local/share/applications` — removed with a
+  plain `rm`, no prompt, no package touched
+- `tigervnc`, a pacman-owned application — the floating terminal opened, asked
+  for the password, and `pacman -Rns` took the package **and five orphaned
+  dependencies** (`xorg-xsetroot`, `xorg-xinit`, `xorg-xrdb`, `xorg-xmodmap`,
+  `fltk1.3`) with it
+
+That cascade is worth knowing about: uninstalling one application can remove
+several packages. It is `-Rns` doing its job, it is Omarchy's choice rather than
+this plugin's, and the terminal lists everything before the user confirms.

@@ -95,6 +95,7 @@ Item {
   function setShown(next) {
     root.opened = next
     root.uninstallTarget = null
+    root.editMode = false
     if (next === root.shown)
       return
     if (next) {
@@ -248,6 +249,29 @@ Item {
   // dialog is answered.
   property var uninstallTarget: null
 
+  // macOS's jiggle mode: hold an icon and the whole grid starts wobbling with a
+  // remove badge on every app, until you click away. It is a mode, not a menu,
+  // which is why a long press enters it and anything else leaves it.
+  property bool editMode: false
+
+  // One animation drives the whole grid; each tile reads this and offsets by
+  // its own index. Thirty separate animations would be thirty things to stop,
+  // and stopping them would leave each tile at whatever angle it had reached --
+  // binding to a shared phase means turning editMode off snaps everything back
+  // to zero for free.
+  property real wigglePhase: 0
+
+  NumberAnimation on wigglePhase {
+    running: root.editMode
+    loops: Animation.Infinite
+    from: 0
+    to: 2 * Math.PI
+    duration: 360
+  }
+
+  // Typing is a request to find something, not to keep editing.
+  onQueryChanged: root.editMode = false
+
   function requestUninstall(entry) {
     if (!root.canUninstall)
       return;
@@ -265,11 +289,21 @@ Item {
     root.uninstallTarget = null;
   }
 
+  // Escape backs out one layer at a time -- dialog, then jiggle mode, then
+  // Launchpad itself. Collapsing these would mean a stray Escape closed the
+  // whole thing while the user was only trying to dismiss an alert.
+  function back() {
+    if (root.uninstallTarget) root.cancelUninstall();
+    else if (root.editMode) root.editMode = false;
+    else root.dismiss();
+  }
+
   function confirmUninstall() {
     const target = root.uninstallTarget;
     root.uninstallTarget = null;
     if (!target || !root.canUninstall)
       return;
+    root.editMode = false;
     root.appLibrary.remove(target.id, target.name);
     // Close: removal may open a terminal for the password, and that must not
     // come up behind a full-screen overlay holding exclusive keyboard focus.
@@ -356,7 +390,7 @@ Item {
       // MouseArea: a MouseArea grabs the press and the DragHandler below would
       // never see a swipe. Handlers cooperate -- a drag simply isn't a tap.
       TapHandler {
-        onTapped: root.uninstallTarget ? root.cancelUninstall() : root.dismiss()
+        onTapped: root.back()
       }
 
       function goTo(index) {
@@ -386,7 +420,7 @@ Item {
       }
 
       function scrolled(delta) {
-        if (root.pageCount <= 1 || root.uninstallTarget)
+        if (root.pageCount <= 1 || root.uninstallTarget || root.editMode)
           return;
 
         // Still inside the gesture that already turned a page: swallow the
@@ -501,14 +535,12 @@ Item {
             }
           }
 
-          // Escape backs out one level at a time: the confirm dialog first, then
-          // Launchpad itself.
-          Keys.onEscapePressed: root.uninstallTarget ? root.cancelUninstall() : root.dismiss()
+          Keys.onEscapePressed: root.back()
           // Enter deliberately does nothing while the dialog is up. An alert
           // that uninstalls on the key the user was already pressing to launch
           // something is a trap; the answer has to be a deliberate click.
-          Keys.onReturnPressed: if (!root.uninstallTarget && root.apps.length > 0) root.launch(root.apps[0])
-          Keys.onEnterPressed: if (!root.uninstallTarget && root.apps.length > 0) root.launch(root.apps[0])
+          Keys.onReturnPressed: if (!root.uninstallTarget && !root.editMode && root.apps.length > 0) root.launch(root.apps[0])
+          Keys.onEnterPressed: if (!root.uninstallTarget && !root.editMode && root.apps.length > 0) root.launch(root.apps[0])
           Keys.onLeftPressed: event => {
             if (search.text.length > 0) { event.accepted = false; return; }
             panel.goTo(pages.currentIndex - 1);
@@ -552,7 +584,12 @@ Item {
         interactive: false
 
         delegate: Item {
+          id: page
           required property int index
+          // Aliased because the tile delegate below declares its own `index`
+          // for the wiggle offset, and the Repeater's model expression is
+          // evaluated out here where the two names would collide.
+          readonly property int pageIndex: index
           width: pages.width
           height: pages.height
 
@@ -564,40 +601,110 @@ Item {
 
             Repeater {
               model: {
-                const start = index * root.perPage;
+                const start = page.pageIndex * root.perPage;
                 return root.apps.slice(start, start + root.perPage);
               }
 
               delegate: Item {
                 id: tile
                 required property var modelData
+                required property int index
                 width: panel.cellW
                 height: panel.cellH
+
+                // Neighbours must not wobble in lockstep -- that reads as the
+                // whole grid sliding rather than each icon being loose. The
+                // offset is derived from the index rather than randomised so a
+                // given icon wobbles the same way every time.
+                readonly property real wiggleOffset: (tile.index % 5) * 1.25
 
                 Rectangle {
                   anchors.fill: parent
                   anchors.margins: Math.round(panel.cellW * 0.06)
                   radius: Math.round(panel.iconSize * 0.22)
-                  color: hover.hovered ? Qt.rgba(1, 1, 1, 0.14) : "transparent"
+                  color: hover.hovered && !root.editMode ? Qt.rgba(1, 1, 1, 0.14)
+                                                         : "transparent"
                   Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
                 Column {
+                  id: face
                   anchors.centerIn: parent
                   spacing: Math.round(panel.iconSize * 0.14)
 
-                  Image {
+                  // Bound to the shared phase rather than animated per tile, so
+                  // leaving edit mode returns every icon to level with no
+                  // per-tile animation to stop. 1.6 degrees is small enough to
+                  // stay legible and still obviously alive.
+                  rotation: root.editMode
+                    ? 1.6 * Math.sin(root.wigglePhase + tile.wiggleOffset)
+                    : 0
+                  Behavior on rotation {
+                    enabled: !root.editMode
+                    NumberAnimation { duration: 120 }
+                  }
+
+                  Item {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    source: root.iconFor(tile.modelData)
-                    sourceSize.width: panel.iconSize
-                    sourceSize.height: panel.iconSize
                     width: panel.iconSize
                     height: panel.iconSize
-                    fillMode: Image.PreserveAspectFit
-                    asynchronous: true
-                    smooth: true
-                    scale: hover.hovered ? 1.06 : 1.0
-                    Behavior on scale { NumberAnimation { duration: 120 } }
+
+                    Image {
+                      anchors.fill: parent
+                      source: root.iconFor(tile.modelData)
+                      sourceSize.width: panel.iconSize
+                      sourceSize.height: panel.iconSize
+                      fillMode: Image.PreserveAspectFit
+                      asynchronous: true
+                      smooth: true
+                      scale: hover.hovered && !root.editMode ? 1.06 : 1.0
+                      Behavior on scale { NumberAnimation { duration: 120 } }
+                    }
+
+                    // The remove badge, macOS's circled cross at the icon's top
+                    // left. It only exists in edit mode, and it sits slightly
+                    // outside the icon so it never covers artwork that matters.
+                    Rectangle {
+                      id: badge
+                      width: Math.round(panel.iconSize * 0.34)
+                      height: width
+                      radius: width / 2
+                      x: Math.round(-width * 0.30)
+                      y: Math.round(-width * 0.30)
+                      color: badgeHover.containsMouse ? "#e74c3c" : "#33363f"
+                      border.width: Math.max(1, Math.round(width * 0.07))
+                      border.color: Qt.rgba(1, 1, 1, 0.75)
+                      visible: root.editMode && root.canUninstall
+                      opacity: root.editMode ? 1 : 0
+                      scale: root.editMode ? 1 : 0.4
+                      Behavior on opacity { NumberAnimation { duration: 120 } }
+                      Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutBack } }
+                      Behavior on color { ColorAnimation { duration: 100 } }
+
+                      Text {
+                        anchors.centerIn: parent
+                        text: "\u2715"
+                        textFormat: Text.PlainText
+                        color: "#ffffff"
+                        font.pixelSize: Math.round(badge.width * 0.52)
+                        font.bold: true
+                      }
+
+                      // MouseArea, not a TapHandler. The badge sits inside the
+                      // tile, which has a TapHandler of its own, and pointer
+                      // handlers cooperate rather than block -- both would fire,
+                      // so clicking the badge would also count as tapping the
+                      // icon and drop out of edit mode. A MouseArea takes the
+                      // press exclusively, which is exactly what is wanted here
+                      // and exactly what made it the wrong choice for the
+                      // backdrop, where a drag still has to get through.
+                      MouseArea {
+                        id: badgeHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: root.requestUninstall(tile.modelData)
+                      }
+                    }
                   }
 
                   Text {
@@ -616,15 +723,27 @@ Item {
                 }
 
                 HoverHandler { id: hover }
-                TapHandler { onTapped: root.launch(tile.modelData) }
 
-                // Right-click to uninstall. A separate handler rather than
-                // acceptedButtons on the one above, so a right-click can never
-                // fall through to launching.
+                // In edit mode a plain click leaves the mode instead of
+                // launching. Launching out of jiggle mode would mean the click
+                // that was meant to stop editing also started something.
+                TapHandler {
+                  // Hold to start editing, the way macOS does. Right-click gets
+                  // there too, since holding a mouse button to edit is not a
+                  // gesture anyone tries on a desktop.
+                  longPressThreshold: 0.45
+                  onLongPressed: if (root.canUninstall) root.editMode = true
+                  onTapped: {
+                    if (root.uninstallTarget) return;
+                    if (root.editMode) root.editMode = false;
+                    else root.launch(tile.modelData);
+                  }
+                }
+
                 TapHandler {
                   acceptedButtons: Qt.RightButton
                   enabled: root.canUninstall
-                  onTapped: root.requestUninstall(tile.modelData)
+                  onTapped: root.editMode = true
                 }
               }
             }
@@ -672,12 +791,16 @@ Item {
           onClicked: root.cancelUninstall()
         }
 
+        // Compact on purpose. An alert is a question, not a page: a big card
+        // with a big icon reads as the app being celebrated rather than
+        // deleted, and it covers the grid the user is still orienting by.
         Rectangle {
           id: card
           anchors.centerIn: parent
-          width: Math.round(Math.min(panel.width * 0.30, panel.height * 0.62))
-          height: Math.round(card.width * 0.72)
-          radius: Math.round(card.width * 0.045)
+          width: Math.min(Math.round(panel.width * 0.24), 400)
+          height: body.implicitHeight + card.pad * 2
+          readonly property int pad: Math.round(card.width * 0.065)
+          radius: Math.round(card.width * 0.035)
           color: "#1b1e2b"
           border.width: 1
           border.color: Qt.rgba(1, 1, 1, 0.14)
@@ -687,14 +810,15 @@ Item {
           MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
 
           Column {
+            id: body
             anchors.centerIn: parent
-            width: parent.width - Math.round(card.width * 0.14)
-            spacing: Math.round(card.width * 0.045)
+            width: card.width - card.pad * 2
+            spacing: Math.round(card.pad * 0.55)
 
             Image {
               anchors.horizontalCenter: parent.horizontalCenter
               source: (root.uninstallTarget && root.uninstallTarget.icon) || ""
-              width: Math.round(card.width * 0.20)
+              width: Math.round(card.width * 0.13)
               height: width
               sourceSize.width: width
               sourceSize.height: width
@@ -709,7 +833,7 @@ Item {
               text: "Uninstall " + ((root.uninstallTarget && root.uninstallTarget.name) || "") + "?"
               textFormat: Text.PlainText
               color: "#ffffff"
-              font.pixelSize: Math.round(card.width * 0.062)
+              font.pixelSize: Math.round(card.width * 0.048)
               font.bold: true
               wrapMode: Text.Wrap
               maximumLineCount: 2
@@ -719,29 +843,27 @@ Item {
             Text {
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "Omarchy decides how: a package, a Flatpak, a web app or just "
-                  + "a launcher entry. If it needs root, a terminal opens for your "
-                  + "password."
+              text: "If it needs root, a terminal will open for your password."
               textFormat: Text.PlainText
-              color: Qt.rgba(1, 1, 1, 0.62)
-              font.pixelSize: Math.round(card.width * 0.040)
+              color: Qt.rgba(1, 1, 1, 0.55)
+              font.pixelSize: Math.round(card.width * 0.033)
               wrapMode: Text.Wrap
-              lineHeight: 1.25
             }
+
+            Item { width: 1; height: Math.round(card.pad * 0.35) }
 
             Row {
               anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Math.round(card.width * 0.04)
-              topPadding: Math.round(card.width * 0.02)
+              spacing: Math.round(card.pad * 0.5)
 
-              // Cancel is first and is the wider target: the destructive answer
-              // should never be the one the hand lands on by default.
+              // Cancel first: the destructive answer should never be the one
+              // the hand lands on by default.
               Rectangle {
-                width: Math.round(card.width * 0.40)
-                height: Math.round(card.width * 0.115)
-                radius: height / 2
+                width: Math.round((body.width - Math.round(card.pad * 0.5)) / 2)
+                height: Math.round(card.width * 0.085)
+                radius: Math.round(height * 0.32)
                 color: cancelHover.containsMouse ? Qt.rgba(1, 1, 1, 0.20)
-                                                 : Qt.rgba(1, 1, 1, 0.12)
+                                                 : Qt.rgba(1, 1, 1, 0.11)
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
@@ -749,7 +871,7 @@ Item {
                   text: "Cancel"
                   textFormat: Text.PlainText
                   color: "#ffffff"
-                  font.pixelSize: Math.round(card.width * 0.045)
+                  font.pixelSize: Math.round(card.width * 0.037)
                 }
 
                 MouseArea {
@@ -761,10 +883,10 @@ Item {
               }
 
               Rectangle {
-                width: Math.round(card.width * 0.40)
-                height: Math.round(card.width * 0.115)
-                radius: height / 2
-                color: removeHover.containsMouse ? "#c0392b" : Qt.rgba(0.75, 0.22, 0.17, 0.85)
+                width: Math.round((body.width - Math.round(card.pad * 0.5)) / 2)
+                height: Math.round(card.width * 0.085)
+                radius: Math.round(height * 0.32)
+                color: removeHover.containsMouse ? "#e74c3c" : "#c0392b"
                 Behavior on color { ColorAnimation { duration: 100 } }
 
                 Text {
@@ -772,7 +894,7 @@ Item {
                   text: "Uninstall"
                   textFormat: Text.PlainText
                   color: "#ffffff"
-                  font.pixelSize: Math.round(card.width * 0.045)
+                  font.pixelSize: Math.round(card.width * 0.037)
                   font.bold: true
                 }
 

@@ -60,8 +60,10 @@ thing it asks you to change, and you make that change yourself.
 | *(type anything)* | Filter by name or generic name, live |
 | `Enter` | Launch the first match |
 | `←` `→` | Previous / next page — but only when the search box is empty, so arrow keys still edit the text |
-| **Right-click an icon** | Uninstall it, after a confirmation |
-| `Esc`, click the backdrop | Close the dialog if one is up, otherwise close Launchpad |
+| **Hold an icon** (or right-click it) | Enter jiggle mode — every icon gets a remove badge |
+| **Click a remove badge** | Uninstall that app, after a confirmation |
+| Click an icon while jiggling | Leave jiggle mode (it does **not** launch) |
+| `Esc`, click the backdrop | Back out one layer: dialog, then jiggle mode, then Launchpad |
 
 Scroll or drag sideways to page; click a page dot to jump. A two-finger
 touchpad scroll in either axis pages too.
@@ -72,15 +74,25 @@ so the answer has to be a deliberate click.
 
 ## Uninstalling
 
-Right-click an icon and Launchpad asks whether to uninstall it. macOS does this
-with a long press into jiggle mode and an X badge; right-click is the same idea
-in a form that does not fight with drag-to-page.
+Hold an icon and the grid starts wobbling with a remove badge on every app,
+exactly as macOS Launchpad does; right-click gets there too, because holding a
+mouse button to edit is not a gesture anyone tries on a desktop. Click a badge
+and Launchpad asks before doing anything.
+
+It is a mode, not a menu: anything that is not a badge leaves it, including
+clicking an icon — so the click that stops editing never also launches
+something. Typing leaves it as well, since a search is a request to find
+something rather than to keep editing.
 
 The removal itself is entirely Omarchy's. Confirming calls the shell's own
 `AppLibrary.remove()`, which runs `omarchy-remove-launcher-entry` — that decides
 for itself whether the entry is a web app, a terminal wrapper, a hand-written
 `.desktop` file, a pacman package or a Flatpak, and for the privileged cases
 opens a floating terminal so the sudo prompt is visible to you.
+
+Note that the package branch runs `pacman -Rns`, so unused dependencies go with
+it — removing one application can remove several packages. That is Omarchy's
+behaviour, and the terminal shows you the full list before you confirm.
 
 **This plugin contains no `sudo`, no package manager, and no shell string.**
 That is the difference between delegating a privileged action and performing
