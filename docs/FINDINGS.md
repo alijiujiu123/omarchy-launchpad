@@ -164,3 +164,57 @@ icon is a perfectly good answer.
 The Omarchy marketplace's automated security review **does not read QML** — it
 scans manifests and shell scripts. None of the above will be pointed out for
 you.
+
+## 9. `shell` is null during `Component.onCompleted`
+
+The host injects `shell` and `manifest` as properties **after** the object is
+constructed, so a probe in `Component.onCompleted` reports `shell=null` and
+concludes, wrongly, that the plugin cannot reach the session's services. React
+to `onShellChanged`, or evaluate lazily through a binding, as `appLibrary` and
+`canUninstall` do here.
+
+Measured during bring-up: `Component.onCompleted` → `shell=null`;
+`onShellChanged` → `shell=yes appLibrary=yes remove=yes launch=yes`.
+
+## 10. Uninstall is delegated, not implemented
+
+`shell.appLibrary` is the session-wide application service — the same object the
+bar menu and Omarchy's own launcher use — and it is reachable from a third-party
+plugin, on the same injected object as `shell.hide()`.
+
+`appLibrary.remove(desktopId, name)` runs
+`$OMARCHY_PATH/bin/omarchy-remove-launcher-entry`, which sorts out for itself
+whether the entry is:
+
+| Kind | What happens |
+| --- | --- |
+| web app | `omarchy-webapp-remove` |
+| terminal wrapper (`$TERMINAL … -e`) | `omarchy-tui-remove` |
+| a file under `~/.local/share/applications` | plain `rm` + `update-desktop-database` |
+| owned by a package (`pacman -Qqo`) | a floating terminal running `sudo pacman -Rns` |
+| a Flatpak | a floating terminal running `flatpak uninstall` |
+
+So the plugin contains no `sudo`, no package manager, and no shell string, and
+the password prompt happens in a terminal the user can see. A plugin that
+shelled out to `sudo pacman -Rns` itself would deserve to be rejected; this is
+the same action, delegated to the first party that owns it.
+
+Omarchy's own launcher already exposes this on the **Delete** key with a confirm
+dialog. Launchpad does not bind Delete, because it has no keyboard selection
+model — the search box always holds focus and there is no "current" icon for a
+key to act on. Right-click is the only trigger.
+
+## 11. What the conversion actually saved
+
+Measured on this machine, PSS (RSS overstates it — the two processes share Qt's
+libraries):
+
+| | PSS |
+| --- | --- |
+| omarchy-shell + standalone launchpad daemon | 417 MB + 293 MB = **710 MB** |
+| omarchy-shell with the plugin mounted | **511 MB** |
+
+**~199 MB**, one sample each, taken shortly after a shell restart with the grid
+opened once so the wallpaper was decoded in both cases. What is saved is the
+duplicated QML engine, scene graph and GPU context — not Launchpad's own data,
+which still exists, just in the other process.

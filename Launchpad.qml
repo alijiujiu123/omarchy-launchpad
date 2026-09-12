@@ -94,6 +94,7 @@ Item {
 
   function setShown(next) {
     root.opened = next
+    root.uninstallTarget = null
     if (next === root.shown)
       return
     if (next) {
@@ -197,15 +198,81 @@ Item {
         && value.indexOf("..") === -1;
   }
 
+  // The shell injects its own AppLibrary, which owns launching and removal for
+  // the whole session -- the bar menu and the launcher go through the same
+  // object. Using it rather than rolling our own means launch feedback appears
+  // where the user expects it and, for removal, that no privileged code lives
+  // in this plugin at all.
+  //
+  // NOTE: `shell` is null during Component.onCompleted -- the host injects it
+  // after construction -- so anything that needs it must react to
+  // onShellChanged or be evaluated lazily, as these are.
+  readonly property var appLibrary: root.shell ? root.shell.appLibrary : null
+
+  readonly property bool canUninstall: !!(root.appLibrary
+      && typeof root.appLibrary.remove === "function")
+
   // Launch through uwsm-app + gtk-launch, the same path Omarchy's own menu
   // uses: it keeps apps out of the compositor's systemd scope and copes with
   // desktop ids containing dots. Keep the .desktop suffix, or ids like
-  // org.telegram.desktop fail to resolve.
+  // org.telegram.desktop fail to resolve. AppLibrary does exactly this and adds
+  // the session's launch feedback; the direct call is the fallback for a host
+  // that does not provide it.
   function launch(entry) {
     const id = String((entry && entry.id) || "");
     if (!root.looksLikeDesktopId(id))
       return;
-    Quickshell.execDetached(["uwsm-app", "--", "gtk-launch", id + ".desktop"]);
+    const name = root.displayLabel(entry && entry.name);
+    if (root.appLibrary && typeof root.appLibrary.launch === "function")
+      root.appLibrary.launch(id, name);
+    else
+      Quickshell.execDetached(["uwsm-app", "--", "gtk-launch", id + ".desktop"]);
+    root.dismiss();
+  }
+
+  // --- uninstall ----------------------------------------------------------
+  // Right-click an icon to remove the application. macOS does this with a
+  // long-press into jiggle mode and an X badge; right-click is the same idea
+  // in a form that does not fight with drag-to-page.
+  //
+  // The work is entirely Omarchy's: AppLibrary.remove() runs
+  // `omarchy-remove-launcher-entry`, which decides for itself whether the entry
+  // is a webapp, a terminal wrapper, a user-written .desktop file, a pacman
+  // package or a Flatpak, and for the privileged cases opens a floating
+  // terminal so the sudo prompt is visible to the user. This plugin therefore
+  // contains no sudo, no package manager, and no shell string -- which is the
+  // difference between delegating a privileged action and performing one.
+  //
+  // Snapshot the id, name and icon at request time: the grid re-filters live,
+  // so the entry under the cursor is not guaranteed to still be there when the
+  // dialog is answered.
+  property var uninstallTarget: null
+
+  function requestUninstall(entry) {
+    if (!root.canUninstall)
+      return;
+    const id = String((entry && entry.id) || "");
+    if (!root.looksLikeDesktopId(id))
+      return;
+    root.uninstallTarget = {
+      id: id,
+      name: root.displayLabel(entry && entry.name),
+      icon: root.iconFor(entry)
+    };
+  }
+
+  function cancelUninstall() {
+    root.uninstallTarget = null;
+  }
+
+  function confirmUninstall() {
+    const target = root.uninstallTarget;
+    root.uninstallTarget = null;
+    if (!target || !root.canUninstall)
+      return;
+    root.appLibrary.remove(target.id, target.name);
+    // Close: removal may open a terminal for the password, and that must not
+    // come up behind a full-screen overlay holding exclusive keyboard focus.
     root.dismiss();
   }
 
@@ -289,7 +356,7 @@ Item {
       // MouseArea: a MouseArea grabs the press and the DragHandler below would
       // never see a swipe. Handlers cooperate -- a drag simply isn't a tap.
       TapHandler {
-        onTapped: root.dismiss()
+        onTapped: root.uninstallTarget ? root.cancelUninstall() : root.dismiss()
       }
 
       function goTo(index) {
@@ -319,7 +386,7 @@ Item {
       }
 
       function scrolled(delta) {
-        if (root.pageCount <= 1)
+        if (root.pageCount <= 1 || root.uninstallTarget)
           return;
 
         // Still inside the gesture that already turned a page: swallow the
@@ -370,6 +437,8 @@ Item {
             startX = centroid.position.x;
             return;
           }
+          if (root.uninstallTarget)
+            return;
           const dx = centroid.position.x - startX;
           const threshold = panel.width / 12;
           if (dx <= -threshold)
@@ -432,9 +501,14 @@ Item {
             }
           }
 
-          Keys.onEscapePressed: root.dismiss()
-          Keys.onReturnPressed: if (root.apps.length > 0) root.launch(root.apps[0])
-          Keys.onEnterPressed: if (root.apps.length > 0) root.launch(root.apps[0])
+          // Escape backs out one level at a time: the confirm dialog first, then
+          // Launchpad itself.
+          Keys.onEscapePressed: root.uninstallTarget ? root.cancelUninstall() : root.dismiss()
+          // Enter deliberately does nothing while the dialog is up. An alert
+          // that uninstalls on the key the user was already pressing to launch
+          // something is a trap; the answer has to be a deliberate click.
+          Keys.onReturnPressed: if (!root.uninstallTarget && root.apps.length > 0) root.launch(root.apps[0])
+          Keys.onEnterPressed: if (!root.uninstallTarget && root.apps.length > 0) root.launch(root.apps[0])
           Keys.onLeftPressed: event => {
             if (search.text.length > 0) { event.accepted = false; return; }
             panel.goTo(pages.currentIndex - 1);
@@ -543,6 +617,15 @@ Item {
 
                 HoverHandler { id: hover }
                 TapHandler { onTapped: root.launch(tile.modelData) }
+
+                // Right-click to uninstall. A separate handler rather than
+                // acceptedButtons on the one above, so a right-click can never
+                // fall through to launching.
+                TapHandler {
+                  acceptedButtons: Qt.RightButton
+                  enabled: root.canUninstall
+                  onTapped: root.requestUninstall(tile.modelData)
+                }
               }
             }
           }
@@ -567,6 +650,140 @@ Item {
             Behavior on color { ColorAnimation { duration: 150 } }
 
             TapHandler { onTapped: pages.currentIndex = index }
+          }
+        }
+      }
+
+      // --- uninstall confirmation ------------------------------------------
+      // Plain MouseArea rather than pointer handlers here: this is a modal
+      // surface whose whole job is to swallow input, which is exactly what a
+      // MouseArea's grab does and what made it the wrong choice for the
+      // backdrop above.
+      Rectangle {
+        id: scrim
+        anchors.fill: parent
+        z: 10
+        visible: root.uninstallTarget !== null
+        color: Qt.rgba(0, 0, 0, 0.5)
+
+        MouseArea {
+          anchors.fill: parent
+          acceptedButtons: Qt.AllButtons
+          onClicked: root.cancelUninstall()
+        }
+
+        Rectangle {
+          id: card
+          anchors.centerIn: parent
+          width: Math.round(Math.min(panel.width * 0.30, panel.height * 0.62))
+          height: Math.round(card.width * 0.72)
+          radius: Math.round(card.width * 0.045)
+          color: "#1b1e2b"
+          border.width: 1
+          border.color: Qt.rgba(1, 1, 1, 0.14)
+
+          // Swallows clicks so answering the dialog does not also hit the
+          // scrim behind it and cancel.
+          MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
+
+          Column {
+            anchors.centerIn: parent
+            width: parent.width - Math.round(card.width * 0.14)
+            spacing: Math.round(card.width * 0.045)
+
+            Image {
+              anchors.horizontalCenter: parent.horizontalCenter
+              source: (root.uninstallTarget && root.uninstallTarget.icon) || ""
+              width: Math.round(card.width * 0.20)
+              height: width
+              sourceSize.width: width
+              sourceSize.height: width
+              fillMode: Image.PreserveAspectFit
+              asynchronous: true
+              smooth: true
+            }
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Uninstall " + ((root.uninstallTarget && root.uninstallTarget.name) || "") + "?"
+              textFormat: Text.PlainText
+              color: "#ffffff"
+              font.pixelSize: Math.round(card.width * 0.062)
+              font.bold: true
+              wrapMode: Text.Wrap
+              maximumLineCount: 2
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Omarchy decides how: a package, a Flatpak, a web app or just "
+                  + "a launcher entry. If it needs root, a terminal opens for your "
+                  + "password."
+              textFormat: Text.PlainText
+              color: Qt.rgba(1, 1, 1, 0.62)
+              font.pixelSize: Math.round(card.width * 0.040)
+              wrapMode: Text.Wrap
+              lineHeight: 1.25
+            }
+
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Math.round(card.width * 0.04)
+              topPadding: Math.round(card.width * 0.02)
+
+              // Cancel is first and is the wider target: the destructive answer
+              // should never be the one the hand lands on by default.
+              Rectangle {
+                width: Math.round(card.width * 0.40)
+                height: Math.round(card.width * 0.115)
+                radius: height / 2
+                color: cancelHover.containsMouse ? Qt.rgba(1, 1, 1, 0.20)
+                                                 : Qt.rgba(1, 1, 1, 0.12)
+                Behavior on color { ColorAnimation { duration: 100 } }
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "Cancel"
+                  textFormat: Text.PlainText
+                  color: "#ffffff"
+                  font.pixelSize: Math.round(card.width * 0.045)
+                }
+
+                MouseArea {
+                  id: cancelHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: root.cancelUninstall()
+                }
+              }
+
+              Rectangle {
+                width: Math.round(card.width * 0.40)
+                height: Math.round(card.width * 0.115)
+                radius: height / 2
+                color: removeHover.containsMouse ? "#c0392b" : Qt.rgba(0.75, 0.22, 0.17, 0.85)
+                Behavior on color { ColorAnimation { duration: 100 } }
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "Uninstall"
+                  textFormat: Text.PlainText
+                  color: "#ffffff"
+                  font.pixelSize: Math.round(card.width * 0.045)
+                  font.bold: true
+                }
+
+                MouseArea {
+                  id: removeHover
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: root.confirmUninstall()
+                }
+              }
+            }
           }
         }
       }

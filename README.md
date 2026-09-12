@@ -60,10 +60,32 @@ thing it asks you to change, and you make that change yourself.
 | *(type anything)* | Filter by name or generic name, live |
 | `Enter` | Launch the first match |
 | `←` `→` | Previous / next page — but only when the search box is empty, so arrow keys still edit the text |
-| `Esc`, click the backdrop | Close |
+| **Right-click an icon** | Uninstall it, after a confirmation |
+| `Esc`, click the backdrop | Close the dialog if one is up, otherwise close Launchpad |
 
 Scroll or drag sideways to page; click a page dot to jump. A two-finger
 touchpad scroll in either axis pages too.
+
+`Enter` deliberately does nothing while the confirmation is up. An alert that
+uninstalls on the key you were already pressing to launch something is a trap,
+so the answer has to be a deliberate click.
+
+## Uninstalling
+
+Right-click an icon and Launchpad asks whether to uninstall it. macOS does this
+with a long press into jiggle mode and an X badge; right-click is the same idea
+in a form that does not fight with drag-to-page.
+
+The removal itself is entirely Omarchy's. Confirming calls the shell's own
+`AppLibrary.remove()`, which runs `omarchy-remove-launcher-entry` — that decides
+for itself whether the entry is a web app, a terminal wrapper, a hand-written
+`.desktop` file, a pacman package or a Flatpak, and for the privileged cases
+opens a floating terminal so the sudo prompt is visible to you.
+
+**This plugin contains no `sudo`, no package manager, and no shell string.**
+That is the difference between delegating a privileged action and performing
+one, and it is deliberate. If the host does not provide an `AppLibrary`, the
+right-click does nothing rather than falling back to something homemade.
 
 ## Requirements
 
