@@ -87,17 +87,25 @@ something rather than to keep editing.
 The removal itself is entirely Omarchy's. Confirming calls the shell's own
 `AppLibrary.remove()`, which runs `omarchy-remove-launcher-entry` — that decides
 for itself whether the entry is a web app, a terminal wrapper, a hand-written
-`.desktop` file, a pacman package or a Flatpak, and for the privileged cases
-opens a floating terminal so the sudo prompt is visible to you.
+`.desktop` file, a system package or a Flatpak. Where elevated rights are
+needed it opens a floating terminal, so the authentication prompt is visible to
+you rather than happening somewhere you cannot see.
 
-Note that the package branch runs `pacman -Rns`, so unused dependencies go with
-it — removing one application can remove several packages. That is Omarchy's
-behaviour, and the terminal shows you the full list before you confirm.
+Note that the system-package branch removes unused dependencies along with the
+application, so uninstalling one thing can remove several packages. That is
+Omarchy's behaviour rather than this plugin's, and the terminal lists everything
+before you confirm.
 
-**This plugin contains no `sudo`, no package manager, and no shell string.**
-That is the difference between delegating a privileged action and performing
-one, and it is deliberate. If the host does not provide an `AppLibrary`, the
-right-click does nothing rather than falling back to something homemade.
+**This plugin contains no privilege escalation, no package-manager command, and
+no shell string.** That is the difference between delegating a privileged action
+and performing one, and it is deliberate. If the host does not provide an
+`AppLibrary`, the badge does nothing rather than falling back to something
+homemade.
+
+Names taken from `.desktop` files are stripped of control characters before they
+are displayed or handed on. `printf %q` protects a shell correctly, but escape
+sequences survive it and reach the terminal emulator, which is a different
+reader with different rules.
 
 ## Requirements
 

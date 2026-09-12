@@ -159,8 +159,15 @@ Item {
   readonly property int maxIconNameLength: 128
   readonly property int maxIconPathLength: 512
 
+  // Control characters are stripped, not just capped. The name is displayed in
+  // QML, where a newline breaks the layout -- but it is also handed to
+  // AppLibrary.remove(), and Omarchy's uninstall helper echoes it into a
+  // floating terminal. `printf %q` protects the SHELL from it, and it does so
+  // correctly, but escape sequences survive that and reach the terminal
+  // emulator, which is a different reader with different rules. A name is a
+  // label; nothing is lost by refusing the bytes that are not.
   function displayLabel(value) {
-    const text = String(value || "");
+    const text = String(value || "").replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
     return text.length > root.maxLabelLength
       ? text.slice(0, root.maxLabelLength) + "…"
       : text;
@@ -238,11 +245,12 @@ Item {
   //
   // The work is entirely Omarchy's: AppLibrary.remove() runs
   // `omarchy-remove-launcher-entry`, which decides for itself whether the entry
-  // is a webapp, a terminal wrapper, a user-written .desktop file, a pacman
-  // package or a Flatpak, and for the privileged cases opens a floating
-  // terminal so the sudo prompt is visible to the user. This plugin therefore
-  // contains no sudo, no package manager, and no shell string -- which is the
-  // difference between delegating a privileged action and performing one.
+  // is a webapp, a terminal wrapper, a user-written .desktop file, a system
+  // package or a Flatpak, and where elevated rights are needed it opens a
+  // floating terminal so the authentication prompt is visible to the user. This
+  // plugin therefore contains no privilege escalation, no package-manager
+  // command and no shell string -- which is the difference between delegating a
+  // privileged action and performing one.
   //
   // Snapshot the id, name and icon at request time: the grid re-filters live,
   // so the entry under the cursor is not guaranteed to still be there when the
@@ -596,8 +604,14 @@ Item {
           width: pages.width
           height: pages.height
 
+          // Anchored to the TOP, not centred. A full page fills the grid area
+          // exactly -- 5 rows of cellH is gridH -- so for those two the layouts
+          // are identical. It only shows on the last page: centring left a
+          // short final row floating in the middle of the screen, unrelated to
+          // where every other page's first row starts.
           Grid {
-            anchors.centerIn: parent
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
             columns: root.columns
             rowSpacing: 0
             columnSpacing: 0

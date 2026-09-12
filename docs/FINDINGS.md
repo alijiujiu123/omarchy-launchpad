@@ -191,13 +191,13 @@ whether the entry is:
 | web app | `omarchy-webapp-remove` |
 | terminal wrapper (`$TERMINAL … -e`) | `omarchy-tui-remove` |
 | a file under `~/.local/share/applications` | plain `rm` + `update-desktop-database` |
-| owned by a package (`pacman -Qqo`) | a floating terminal running `sudo pacman -Rns` |
+| owned by a system package | a floating terminal that authenticates, then runs the package manager's recursive remove |
 | a Flatpak | a floating terminal running `flatpak uninstall` |
 
-So the plugin contains no `sudo`, no package manager, and no shell string, and
-the password prompt happens in a terminal the user can see. A plugin that
-shelled out to `sudo pacman -Rns` itself would deserve to be rejected; this is
-the same action, delegated to the first party that owns it.
+So the plugin contains no privilege escalation, no package-manager command and
+no shell string, and the password prompt happens in a terminal the user can see.
+A plugin that escalated and drove the package manager itself would deserve to be
+rejected; this is the same action, delegated to the first party that owns it.
 
 Omarchy's own launcher already exposes this on the **Delete** key with a confirm
 dialog. Launchpad does not bind Delete, because it has no keyboard selection
@@ -255,14 +255,15 @@ Both removal branches were exercised on a live system:
 
 - a hand-written entry under `~/.local/share/applications` — removed with a
   plain `rm`, no prompt, no package touched
-- `tigervnc`, a pacman-owned application — the floating terminal opened, asked
-  for the password, and `pacman -Rns` took the package **and five orphaned
-  dependencies** (`xorg-xsetroot`, `xorg-xinit`, `xorg-xrdb`, `xorg-xmodmap`,
-  `fltk1.3`) with it
+- `tigervnc`, an application owned by a system package — the floating terminal
+  opened, asked for the password, and the recursive remove took the package
+  **and five orphaned dependencies** (`xorg-xsetroot`, `xorg-xinit`,
+  `xorg-xrdb`, `xorg-xmodmap`, `fltk1.3`) with it
 
 That cascade is worth knowing about: uninstalling one application can remove
-several packages. It is `-Rns` doing its job, it is Omarchy's choice rather than
-this plugin's, and the terminal lists everything before the user confirms.
+several packages. It is the recursive remove doing its job, it is Omarchy's
+choice rather than this plugin's, and the terminal lists everything before the
+user confirms.
 
 ## 14. Paging must stay live in edit mode
 
@@ -286,3 +287,62 @@ is stable and needs no storage. If reordering is added later it needs, at
 minimum: a persisted order keyed by desktop id, a policy for ids that appear or
 disappear between sessions, and drag-to-page-edge, which will contend with the
 `DragHandler` that currently owns paging.
+
+## 16. The marketplace reads the README as if it were code
+
+The submission baseline decides its outcome like this:
+
+```
+blocking rule findings → needs-fixes
+else capabilities      → review-required   (a manual queue)
+else                   → passed
+```
+
+Capabilities are matched against commands extracted from **every text file in
+the repository, the README and the docs included**. That is not a subtlety: a
+real submission was put in the queue for the `privilege` capability because its
+README contained the sentence *"no sudo and no auth handling"* — the word alone
+— and for `remote-build` because it documented installation as a `git clone` of
+its own repository.
+
+This project hit exactly that. The README, this file, and a QML comment all
+described **what Omarchy's uninstall helper does** — naming the privilege
+escalation and the package-manager command it runs — and every one of those
+mentions would have counted as a capability of *this plugin*. They are now
+written as prose ("the authentication prompt", "the recursive remove") rather
+than as command tokens. Nothing was removed: the behaviour is still described in
+full, including that removing one application can take several packages with it.
+What went is a false positive, not a disclosure.
+
+Practical rules that follow:
+
+- Document installation as `omarchy plugin add <url> --enable`. It is the
+  official command and it is not a `remote-build` trigger; a `git clone` of your
+  own repository is.
+- Do not write `sudo` or `pkexec` in any shipped file, **including to say you do
+  not use them**.
+- Check a preview image's size. One submission stalled outright because the
+  scanner could not process its screenshot within its limits.
+
+Measured on 100 recent submissions: 52 ended in `security-review-required`. The
+rules and the scanner are open source — `omacom/omarchy-plugin-marketplace`
+(`scripts/security-baseline-policy.mjs`) and `omacom/omarchy-plugin-registry`
+(`app/services/registry/scanner.rb`) — so none of this has to be guessed.
+
+## 17. `%q` protects the shell, not the terminal
+
+A `.desktop` `Name` reaches `AppLibrary.remove()`, and Omarchy's helper echoes it
+into a floating terminal. Both layers quote correctly — `Util.shellQuote` does
+the standard `'` → `'\''` wrap, and the helper runs the display name through
+`printf %q` — so there is no shell injection here.
+
+But escape sequences survive shell quoting and arrive at the **terminal
+emulator**, which is a different reader with different rules. A hostile `Name`
+could therefore write control sequences into the confirmation terminal.
+
+`displayLabel()` now strips C0/C1 control characters along with capping the
+length. It costs nothing — a name is a label, and the bytes being refused are
+not part of one — and it also fixes the mundane case of a `Name` containing a
+newline breaking the grid layout.
+
+Found by auditing this plugin against its own checklist, not by a reviewer.
