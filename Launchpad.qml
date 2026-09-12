@@ -420,7 +420,10 @@ Item {
       }
 
       function scrolled(delta) {
-        if (root.pageCount <= 1 || root.uninstallTarget || root.editMode)
+        // Paging stays live in edit mode -- macOS pages while jiggling, and
+        // blocking it would mean you can only remove apps from whichever page
+        // you happened to be on. Only the modal dialog stops it.
+        if (root.pageCount <= 1 || root.uninstallTarget)
           return;
 
         // Still inside the gesture that already turned a page: swallow the

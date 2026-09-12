@@ -263,3 +263,26 @@ Both removal branches were exercised on a live system:
 That cascade is worth knowing about: uninstalling one application can remove
 several packages. It is `-Rns` doing its job, it is Omarchy's choice rather than
 this plugin's, and the terminal lists everything before the user confirms.
+
+## 14. Paging must stay live in edit mode
+
+Jiggle mode first shipped with scroll and drag paging disabled while it was on.
+That was wrong twice over: with 64 applications there are three pages, so it
+meant only the page you happened to be on could be edited — and the page dots
+were never blocked, so clicking a dot paged while swiping did not. macOS pages
+while jiggling. Only the modal dialog stops paging now.
+
+## 15. Not implemented: reordering
+
+macOS Launchpad lets you drag icons into a different position, and onto another
+page, while jiggling. This does not, and that is a deliberate omission rather
+than an oversight: an order the user arranges has to be **remembered**, which
+means the plugin would start writing state outside its own folder. Today it
+writes nothing at all, which is a claim worth keeping until there is a reason to
+give it up.
+
+The order is alphabetical, computed from `DesktopEntries` on every change, so it
+is stable and needs no storage. If reordering is added later it needs, at
+minimum: a persisted order keyed by desktop id, a policy for ids that appear or
+disappear between sessions, and drag-to-page-edge, which will contend with the
+`DragHandler` that currently owns paging.
