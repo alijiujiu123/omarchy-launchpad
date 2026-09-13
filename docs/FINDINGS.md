@@ -543,3 +543,54 @@ When Hyprland has not reported a focused monitor the name is empty and every
 screen shows it, which is the old behaviour. **Showing it everywhere is a better
 failure than showing it nowhere** — one is redundant, the other looks like the
 keybinding is broken.
+
+## 22. The way to bound a file is not to open one
+
+Three rounds of review went into making the wallpaper safe, and each fix was
+partial:
+
+1. Resolve the link and load the resolved path — *a pathname something else
+   controls should not reach an image loader.*
+2. Return a bounded cache token instead, and validate the target in the helper —
+   *the helper checks and exits; QML reopens by pathname later. The file
+   consumed is not the file checked.*
+3. Make the image asynchronous — *moves the I/O off the render thread without
+   imposing any byte, decode-size or decode-time ceiling, and a worker can still
+   block on a special file.*
+
+The reviewer's summary is the lesson: **a pathname token plus a later reopen
+cannot close this race.** Check-then-reopen is not a safe pattern, however
+carefully the check is written.
+
+What ended it was a question from outside the problem — *why does the wallpaper
+have to be read at all?* The grid covers the screen; what is behind it only has
+to be blurred. Asking the compositor to blur what is already there removes the
+file, the helper, the subprocess, the token, the cache-invalidation logic and
+the preload in one move, and the result is more correct than what it replaced:
+the backdrop follows the theme and the background with nothing to keep in sync.
+
+Two rounds of that review were spent making a feature safe that did not need to
+exist. Worth asking earlier next time.
+
+## 23. The title-bar flicker was never ours
+
+`docs/FINDINGS.md` in the sibling Mission Control project, and this file's
+earlier advice not to add a blur layer rule, both blamed a full-screen blurred
+layer for making hyprbars' title bars flicker. That was a correlation.
+
+The cause is upstream: since Hyprland 0.56, its blur path invalidates the
+stencil buffer that hyprbars masks its rounded corners into
+(`GL_STENCIL_ATTACHMENT` became `GL_DEPTH_STENCIL_ATTACHMENT`, and on a combined
+`GL_DEPTH24_STENCIL8` buffer the old form was apparently a no-op). The bar is
+then stencil-rejected across most of its area and the backdrop shows through,
+varying per frame. It needs `decoration:rounding` non-zero **and** blur enabled,
+which is this machine's configuration. See hyprwm/hyprland-plugins#697.
+
+Confirmed here by changing one variable at a time: the same full-screen layer
+with `blur = true` flickers on teardown and without it does not, and `xray`
+(blurring only the wallpaper) does not help — so the trigger is blur running at
+all, not what it samples.
+
+That also explains why `decoration:blur:new_optimizations = false` never helped:
+it has nothing to do with stencil invalidation. **The earlier note was treating
+a symptom of somebody else's bug as a constraint on this design.**

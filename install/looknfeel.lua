@@ -1,0 +1,28 @@
+-- Background blur for the grid, for ~/.config/hypr/looknfeel.lua.
+--
+-- The blur is the COMPOSITOR's. This plugin reads no wallpaper file of its own:
+-- an earlier version loaded Omarchy's background image and blurred it in QML,
+-- and doing that safely means checking a file whose path something else
+-- controls -- a check that ends before the read cannot bind what the read
+-- consumes. Asking the compositor to blur what is already behind the surface
+-- removes the file, and with it the whole question.
+--
+-- `xray` makes the blur sample the WALLPAPER ONLY, ignoring windows. That is
+-- both the look the QML version produced and much cheaper: without it the blur
+-- is recomputed as windows behind it redraw.
+--
+-- `ignore_alpha` must stay BELOW the backdrop's own alpha (0.45 in
+-- Launchpad.qml) or the compositor treats the surface as too transparent to
+-- blur behind and the effect disappears entirely.
+--
+-- Requires blur enabled globally (`decoration.blur.enabled = true`); a
+-- per-layer rule does nothing on its own.
+--
+-- KNOWN ISSUE, not caused by this plugin: with hyprbars installed, Hyprland
+-- 0.56 flickers window title bars whenever blur runs and `decoration:rounding`
+-- is non-zero. Hyprland's blur path invalidates the stencil buffer hyprbars
+-- masks its rounded corners into, so the bar gets stencil-rejected for a few
+-- frames -- most visible right after a full-screen blurred layer is torn down.
+-- Upstream: hyprwm/hyprland-plugins#697. Omitting this rule avoids triggering
+-- it, at the cost of an unblurred backdrop.
+hl.layer_rule({ match = { namespace = "launchpad" }, blur = true, xray = true, ignore_alpha = 0.25 })

@@ -120,12 +120,7 @@ with Omarchy.
 - `uwsm-app` and `gtk-launch`, used to start the application you pick. Both come
   with Omarchy. Going through `uwsm-app` is what keeps launched apps out of the
   compositor's own systemd scope, which is the same path Omarchy's menu uses.
-- a POSIX shell and coreutils `readlink`/`stat`/`basename`, used by the bundled
-  `bin/wallpaper-token`. It runs at startup and on each open, reads nothing but
-  file metadata, and prints a short cache token — never a path. The wallpaper is
-  always loaded through Omarchy's own `current/background` link; the token only
-  exists so the URL changes when the picture behind that link does, because
-  QtQuick caches images by URL and the link's path never changes.
+
 
 Applications come from `DesktopEntries`, Quickshell's own XDG `.desktop` index,
 so installs and removals are picked up live with no watcher and no cache of our
@@ -133,16 +128,23 @@ own. Entries marked `NoDisplay` are skipped.
 
 ## Theming
 
-The background is your real wallpaper, read from Omarchy's
-`current/background` link, so a theme switch is picked up with no reload.
+The backdrop is the **compositor's** blur of whatever is behind the grid — this
+plugin reads no wallpaper file of its own, so it always matches the current
+theme and background without being told. It needs the layer rule in
+[`install/looknfeel.lua`](install/looknfeel.lua) and blur enabled globally.
 
-The blur is done **in QML**, on the wallpaper image, not by the compositor. Do
-not add a `blur = true` layer rule for the `launchpad` namespace: with hyprbars
-installed, a full-screen blurred layer makes title bars flicker between
-transparent and coloured on every redraw, and
-`decoration:blur:new_optimizations = false` does not stop it. Blurring the image
-ourselves keeps Hyprland's blur machinery out of it entirely, so there is
-nothing left to flicker.
+Earlier versions loaded Omarchy's wallpaper and blurred it in QML. Doing that
+safely means validating a file whose path something else controls, and a check
+that finishes before the read cannot bind what the read consumes. Handing the
+job to the compositor removes the file and the question with it.
+
+**Known issue, not caused by this plugin.** With hyprbars installed, Hyprland
+0.56 flickers window title bars whenever blur runs and `decoration:rounding` is
+non-zero — its blur path invalidates the stencil buffer hyprbars masks its
+rounded corners into ([hyprwm/hyprland-plugins#697](https://github.com/hyprwm/hyprland-plugins/issues/697)).
+It is most visible just after this grid closes, because tearing down a
+full-screen blurred layer triggers a burst of blur passes. Leaving the layer
+rule out avoids triggering it, at the cost of an unblurred backdrop.
 
 ## Performance
 

@@ -1,6 +1,6 @@
 // Launchpad -- a macOS-style application grid for Omarchy.
 //
-// A full-screen page of app icons over the blurred desktop wallpaper, with a
+// A full-screen page of app icons over the blurred desktop, with a
 // search pill at the top and page dots at the bottom. Type to filter, swipe or
 // scroll to page, click to launch.
 //
@@ -25,7 +25,6 @@
 import QtQuick
 import QtQuick.Effects
 import Quickshell
-import Quickshell.Io
 import Quickshell.Hyprland
 import Quickshell.Wayland
 
@@ -61,8 +60,6 @@ Item {
 
   function open(payloadJson) {
     root.refreshActiveScreen()
-    // The background may have changed since the last open.
-    root.refreshWallpaper()
     root.setShown(true)
   }
 
@@ -95,86 +92,6 @@ Item {
   readonly property int columns: 6
   readonly property int rows: 5
   readonly property int perPage: columns * rows
-
-  // Omarchy's current wallpaper, read through the same state symlink its own
-  // background plugin uses. Following the link rather than the theme directory
-  // means a theme switch is picked up with no reload.
-  // The wallpaper is loaded through Omarchy's state symlink -- the same fixed
-  // pathname as before, and the ONLY pathname this plugin ever hands to an
-  // image loader. What changes is a cache token appended as a query, because
-  // the link's path is stable while its target moves (on a theme switch, and on
-  // a background switch within a theme) and QtQuick caches images by URL. Qt
-  // strips a query before opening a local file but keeps it in the cache key.
-  //
-  // An earlier version of this fix resolved the link and used the RESOLVED PATH
-  // as the source. That was wrong in the same way the icon lookup was: a
-  // pathname that something else controls should never reach an image loader,
-  // and bounding the string does not bound what it points at. Reported in
-  // review. Now the helper returns a token and nothing else; it cannot steer
-  // what gets opened.
-  readonly property string wallpaperLink:
-      Quickshell.env("HOME") + "/.local/state/omarchy/current/background"
-  property string wallpaperToken: ""
-  readonly property string wallpaperSource:
-      "file://" + root.wallpaperLink
-      + (root.wallpaperToken.length > 0
-         ? "?v=" + encodeURIComponent(root.wallpaperToken) : "")
-
-  function refreshWallpaper() {
-    if (!wallpaperProbe.running) {
-      wallpaperProbe.running = true
-      probeWatchdog.restart()
-    }
-  }
-
-  Process {
-    id: wallpaperProbe
-    // Absolute interpreter, and a minimal environment: a bare command name
-    // would be resolved through whatever PATH this process inherited, so a
-    // shadowed executable would be run automatically by a plugin that is
-    // mounted for the whole session.
-    command: ["/bin/sh", root.pluginDir + "/bin/wallpaper-token"]
-    clearEnvironment: true
-    environment: ({ "HOME": Quickshell.env("HOME") })
-    stdout: StdioCollector {
-      // The helper prints one short line; the cap is belt and braces.
-      onStreamFinished: root.wallpaperToken = String(text || "").trim().slice(0, 128)
-    }
-  }
-
-  // A deadline. The helper only stats a file, but nothing that runs
-  // automatically in a long-lived process should be able to hang without one.
-  Timer {
-    id: probeWatchdog
-    interval: 2000
-    onTriggered: if (wallpaperProbe.running) wallpaperProbe.running = false
-  }
-
-  readonly property string pluginDir:
-      Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
-
-  // Decoded before anyone asks, which is the point of being keepLoaded and was
-  // not being used for anything. One Image, never drawn; it exists so the panel
-  // finds the identical URL already in QtQuick's cache and the asynchronous
-  // load completes instantly instead of painting the grid first and the
-  // background a beat later.
-  //
-  // Deliberately NOT started from Component.onCompleted. Preloading during the
-  // root object's construction is what delayed the shell's IPC registration
-  // past the point anything waited for it -- the bar rendered and every command
-  // timed out. A Timer puts this after startup, where nothing is waiting.
-  Image {
-    source: root.wallpaperSource
-    visible: false
-    asynchronous: true
-    cache: true
-  }
-
-  Timer {
-    running: true
-    interval: 400
-    onTriggered: root.refreshWallpaper()
-  }
 
   // --- state --------------------------------------------------------------
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
@@ -493,8 +410,8 @@ Item {
       anchors { top: true; bottom: true; left: true; right: true }
       color: "transparent"
 
-      // Hiding tears down the layer surface but keeps the QML tree and, more to
-      // the point, the decoded wallpaper -- which is the 190ms.
+      // Hiding tears down the layer surface but keeps the QML tree, which is
+      // what makes reopening cheap.
       visible: root.shown
                && (root.activeScreen === ""
                    || String(panel.modelData.name || "") === root.activeScreen)
@@ -519,46 +436,26 @@ Item {
       // room; the cap keeps it sane if a screen is very wide but short.
       readonly property int iconSize: Math.max(32, Math.round(Math.min(cellW * 0.44, cellH * 0.52)))
       readonly property int labelSize: Math.max(10, Math.round(iconSize * 0.15))
-
-      // Background: the desktop wallpaper, blurred here in QML, with a dark
-      // tint over it -- exactly what macOS Launchpad does.
+      // NO wallpaper image, and no blur of our own. The compositor blurs
+      // whatever is actually behind this surface -- windows included -- which is
+      // both closer to what macOS does and the only version of this that opens
+      // no files at all.
       //
-      // This is deliberately NOT a compositor blur. A `blur = true` layer rule
-      // on a full-screen layer makes hyprbars' title bars flicker between
-      // transparent and coloured whenever they redraw, and turning off
-      // decoration:blur:new_optimizations was not enough to stop it. Blurring
-      // the wallpaper image ourselves keeps Hyprland's blur machinery out of it
-      // entirely, so there is nothing left to flicker.
-      Image {
-        id: wallpaper
-        anchors.fill: parent
-        source: root.wallpaperSource
-        fillMode: Image.PreserveAspectCrop
-        // Asynchronous, despite the two-step open it causes. The helper checks
-        // the target is a bounded regular file, but it cannot hold it: the link
-        // can be replaced between that check and this load. Decoding off the
-        // main thread means the worst case is a late or missing background
-        // rather than a shell that stops answering.
-        asynchronous: true
-        cache: true
-        visible: false
-      }
-
-      MultiEffect {
-        anchors.fill: parent
-        source: wallpaper
-        autoPaddingEnabled: false
-        blurEnabled: true
-        blur: 1.0
-        blurMax: 64
-        brightness: -0.1
-      }
-
+      // The previous design loaded Omarchy's wallpaper and blurred it in QML. It
+      // worked, and it cost three rounds of security review: reading a file
+      // whose path something else controls means checking it, and a check that
+      // ends before the read cannot bind what the read consumes. The way to win
+      // that argument is not to have the file.
+      //
+      // Needs a layer rule for the `launchpad` namespace (install/looknfeel.lua)
+      // and blur enabled globally. `ignore_alpha` there must stay BELOW this
+      // rectangle's alpha or the compositor decides the surface is too
+      // transparent to blur behind and the effect disappears.
       Rectangle {
         anchors.fill: parent
-        color: "#0e101a"
-        opacity: 0.42
+        color: Qt.rgba(0.055, 0.063, 0.102, 0.45)
       }
+
 
       // Click anywhere that isn't an app to dismiss. A TapHandler rather than a
       // MouseArea: a MouseArea grabs the press and the DragHandler below would
