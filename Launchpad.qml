@@ -26,6 +26,7 @@ import QtQuick
 import QtQuick.Effects
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import Quickshell.Wayland
 
 Item {
@@ -60,6 +61,7 @@ Item {
 
   function open(payloadJson) {
     root.refreshActiveScreen()
+    root.refreshBackdrop()
     root.setShown(true)
   }
 
@@ -97,6 +99,111 @@ Item {
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
   // across the screen at every login.
   property bool shown: false
+
+  // --- backdrop -----------------------------------------------------------
+  //
+  // The wallpaper, blurred -- but this plugin never opens the wallpaper.
+  //
+  // A check that ends before a read cannot bind what the read consumes: the
+  // state link, and whatever it points at, can be replaced in between. Three
+  // rounds of security review on this plugin and its sibling ended there, and
+  // the answer is not a stricter check. It is to decode the untrusted bytes
+  // somewhere they can only cost a short-lived process, and to hand QML
+  // something the plugin made itself.
+  //
+  // `bin/backdrop` resolves the link, refuses anything that is not a bounded
+  // regular file, and renders a 960x600 blurred JPEG into our own cache
+  // directory under ImageMagick resource limits and a timeout. The only
+  // pathname an image loader sees here is that output. A hostile wallpaper
+  // costs the helper a timeout and leaves the previous backdrop on screen.
+  readonly property string pluginDir:
+      Qt.resolvedUrl(".").toString().replace(/^file:\/\//, "").replace(/\/$/, "")
+  // $XDG_RUNTIME_DIR, never a path under $HOME -- see the note in bin/backdrop.
+  // Empty when there is no runtime directory, which leaves backdropVersion at 0
+  // and the bundled backdrop on screen.
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
+  readonly property string cacheDir:
+      root.runtimeDir ? root.runtimeDir + "/omarchy-launchpad" : ""
+  // 0 means "no backdrop rendered yet", and the bundled fallback shows instead.
+  property int backdropVersion: 0
+  // Monotonic, so a URL is never reused after the file behind it changed.
+  property int backdropRenders: 0
+  readonly property string backdropSource: root.backdropVersion > 0
+      ? "file://" + root.cacheDir + "/backdrop.jpg?v=" + root.backdropVersion
+      : ""
+
+  // False from the moment an open is requested until the helper has told us
+  // which backdrop this open gets. The surface waits for it.
+  //
+  // The common case costs nothing: an unchanged wallpaper is a stat and a
+  // string compare, and the helper answers "cached" in single-digit
+  // milliseconds. Only a wallpaper that actually changed pays the render, and
+  // paying it BEFORE the overlay appears is better than appearing with the
+  // previous wallpaper on screen and correcting it half a second later.
+  property bool backdropSettled: false
+
+  function refreshBackdrop() {
+    if (!root.runtimeDir) { root.backdropSettled = true; return }
+    root.backdropSettled = false
+    backdropSettleWatchdog.restart()
+    if (backdropProc.running) return
+    backdropProc.running = true
+    backdropWatchdog.restart()
+  }
+
+  // The overlay must open even if the helper never answers.
+  Timer {
+    id: backdropSettleWatchdog
+    interval: 900
+    repeat: false
+    onTriggered: root.backdropSettled = true
+  }
+
+  Process {
+    id: backdropProc
+    // Absolute interpreter and a minimal environment: a bare command name
+    // would be resolved through whatever PATH this process inherited, and this
+    // plugin is mounted for the whole session.
+    command: ["/bin/sh", root.pluginDir + "/bin/backdrop"]
+    clearEnvironment: true
+    environment: ({
+      "HOME": Quickshell.env("HOME"),
+      "XDG_RUNTIME_DIR": root.runtimeDir
+    })
+    // Line at a time, not all-at-exit: the helper reports "stale" before it
+    // starts rendering, and acting on that is the whole point -- see below.
+    stdout: SplitParser {
+      onRead: function(line) {
+        const result = String(line || "").trim();
+        if (result === "stale") {
+          // Still working. The surface keeps waiting.
+          // The cached backdrop belongs to a wallpaper that is no longer the
+          // wallpaper. Fall back to the bundled pane rather than show the
+          // previous one for the few hundred milliseconds the render takes.
+          root.backdropVersion = 0;
+        } else if (result === "new") {
+          root.backdropVersion = root.backdropRenders + 1;
+          root.backdropRenders += 1;
+          root.backdropSettled = true;
+        } else if (result === "cached") {
+          if (root.backdropVersion === 0) {
+            root.backdropRenders += 1;
+            root.backdropVersion = root.backdropRenders;
+          }
+          root.backdropSettled = true;
+        }
+      }
+    }
+  }
+
+  // Nothing that runs automatically in a long-lived process should be able to
+  // hang without a deadline, even one that already carries its own timeout.
+  Timer {
+    id: backdropWatchdog
+    interval: 20000
+    repeat: false
+    onTriggered: if (backdropProc.running) backdropProc.running = false
+  }
 
   property string query: ""
 
@@ -412,7 +519,11 @@ Item {
 
       // Hiding tears down the layer surface but keeps the QML tree, which is
       // what makes reopening cheap.
-      visible: root.shown
+      // Waits for the backdrop decision, not for the backdrop itself: the
+      // helper runs as a subprocess, so unlike an Image inside this window it
+      // does not need the window to be mapped first. Once it has answered, the
+      // 31 KB result decodes inside a frame.
+      visible: root.shown && root.backdropSettled
                && (root.activeScreen === ""
                    || String(panel.modelData.name || "") === root.activeScreen)
 
@@ -451,9 +562,33 @@ Item {
       // and blur enabled globally. `ignore_alpha` there must stay BELOW this
       // rectangle's alpha or the compositor decides the surface is too
       // transparent to blur behind and the effect disappears.
+      // Bundled fallback, always underneath: a frosted pane that owes nothing
+      // to the machine it is running on. It is what shows before the first
+      // render finishes, and what stays if the helper ever declines.
+      Image {
+        anchors.fill: parent
+        source: Qt.resolvedUrl("assets/frost.jpg")
+        fillMode: Image.PreserveAspectCrop
+        cache: true
+      }
+
+      // The real wallpaper, already blurred and already small: 960x600, tens
+      // of kilobytes, so the decode is invisible rather than something to
+      // schedule around.
+      Image {
+        anchors.fill: parent
+        source: root.backdropSource
+        fillMode: Image.PreserveAspectCrop
+        asynchronous: true
+        cache: true
+        opacity: status === Image.Ready ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 160 } }
+      }
+
+      // Enough dim for white labels to survive a bright wallpaper.
       Rectangle {
         anchors.fill: parent
-        color: Qt.rgba(0.055, 0.063, 0.102, 0.45)
+        color: Qt.rgba(0.02, 0.03, 0.06, 0.34)
       }
 
 

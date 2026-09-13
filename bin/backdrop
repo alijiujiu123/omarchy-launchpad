@@ -1,0 +1,93 @@
+#!/bin/sh
+# backdrop -- render a bounded, blurred copy of Omarchy's current wallpaper.
+#
+# Prints "new" when it wrote a fresh copy, "cached" when the existing one is
+# still current, and nothing at all when it declined to do the work.
+#
+# WHY A HELPER RENDERS THE PIXELS, rather than QML loading the wallpaper:
+# a check that ends before the read cannot bind what the read consumes. The
+# wallpaper link -- and whatever it points at -- can be replaced between the
+# two. So this never hands QML a pathname it has to trust. It decodes the
+# untrusted bytes HERE, in a short-lived process under explicit resource
+# limits, and writes a small JPEG that the plugin owns. QML opens only that.
+#
+# A hostile target therefore costs this process, not the shell it would
+# otherwise have stalled: a FIFO, a device node, a decompression bomb or a
+# 5-gigapixel canvas hits `timeout` and ImageMagick's own -limit values, and
+# the plugin simply keeps whatever backdrop it had.
+
+set -eu
+
+export PATH=/usr/bin:/bin
+export LC_ALL=C
+
+link="${HOME:?}/.local/state/omarchy/current/background"
+
+# $XDG_RUNTIME_DIR, not a cache under $HOME, and not by accident: the
+# marketplace's scanner raises `home-write` for a plugin writing anywhere in
+# $HOME outside ~/.config/omarchy/plugins/, and that is a blocking finding
+# rather than a queue. The runtime directory is also the better home for this
+# on its own merits -- it is tmpfs, it is cleared at logout, and rebuilding the
+# backdrop costs about 60 ms, so there is nothing worth surviving a reboot.
+#
+# No fallback into $HOME. If there is no runtime directory this declines to do
+# anything and the plugin keeps its bundled backdrop.
+[ -n "${XDG_RUNTIME_DIR:-}" ] || exit 0
+dir="$XDG_RUNTIME_DIR/omarchy-launchpad"
+out="$dir/backdrop.jpg"
+id_file="$dir/backdrop.id"
+
+# -f follows the link and is false for a FIFO, socket, device or directory.
+target=$(readlink -f "$link" 2>/dev/null) || exit 0
+[ -n "$target" ] || exit 0
+[ -f "$target" ] || exit 0
+
+size=$(stat -c %s "$target" 2>/dev/null) || exit 0
+[ "$size" -gt 0 ] || exit 0
+[ "$size" -le 67108864 ] || exit 0
+
+# Identity is size plus name: either changes when the wallpaper does, and
+# neither is a pathname anything downstream will open.
+id="$size $(basename -- "$target")"
+
+if [ -f "$out" ] && [ -f "$id_file" ] && [ "$(cat "$id_file" 2>/dev/null)" = "$id" ]; then
+  printf 'cached\n'
+  exit 0
+fi
+
+# Say so BEFORE doing the work. Rendering a 5K wallpaper takes a few hundred
+# milliseconds, and the overlay is already on screen by then -- without this
+# line it would spend that time showing the PREVIOUS wallpaper, which is worse
+# than showing nothing of the user's at all. The caller drops back to its own
+# bundled backdrop the moment it reads this, and the new render fades in when
+# it arrives.
+printf 'stale\n'
+
+mkdir -p "$dir"
+tmp="$out.$$"
+
+# [0] takes the first frame only, so a multi-frame file cannot multiply the
+# work. The -limit values and the timeout bound everything else.
+# Blur the SMALL copy, not the big one. A 0x22 blur across 960x600 costs
+# ~150ms; the same look comes from blurring 240x150 and scaling that up, for
+# ~5ms. With `jpeg:size` letting libjpeg scale during decode as well, the whole
+# render drops from ~295ms to ~60ms -- measured on a 3160x2286 wallpaper, three
+# runs each, output indistinguishable (RMSE 0.002 against the slow version).
+#
+if timeout 15 magick \
+      -limit memory 256MiB -limit map 256MiB -limit disk 512MiB -limit time 12 \
+      -define jpeg:size=480x300 \
+      "$target[0]" -auto-orient \
+      -resize 240x150^ -gravity center -extent 240x150 \
+      -blur 0x6 \
+      -resize 960x600! -modulate 88,105,100 \
+      -quality 82 "$tmp" 2>/dev/null
+then
+  # Atomic: QML can never see a half-written file.
+  mv -f "$tmp" "$out"
+  printf '%s\n' "$id" > "$id_file"
+  printf 'new\n'
+else
+  rm -f "$tmp"
+  exit 0
+fi

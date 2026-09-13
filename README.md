@@ -50,10 +50,13 @@ omarchy plugin remove  io.github.andyweiboan.launchpad
 Then delete the bind you added to `bindings.lua`, and the gesture from
 `input.lua` if you added that.
 
-The plugin writes nothing outside its own folder — no config files, no state, no
-autostart entries, nothing in `~/.local`. Removing it leaves nothing behind, and
-disabling it is enough to stop it being mounted. The keybinding is the only
-thing it asks you to change, and you make that change yourself.
+The plugin keeps no configuration and no state. The one thing it writes is a
+small backdrop image under `$XDG_RUNTIME_DIR/omarchy-launchpad/`, which is
+tmpfs — it is gone at logout whether you remove the plugin or not, and nothing
+of yours lives there. Nothing is written under `~`, there are no autostart
+entries, and disabling the plugin is enough to stop it being mounted. The
+keybinding is the only thing it asks you to change, and you make that change
+yourself.
 
 ## Keys
 
@@ -113,13 +116,37 @@ reader with different rules.
 
 ## Requirements
 
-No external dependencies to install — it is QML, and everything it uses ships
-with Omarchy.
+No external dependencies to install — everything it uses already ships with
+Omarchy.
 
 - Omarchy with shell plugin support (`omarchy plugin list` works)
 - `uwsm-app` and `gtk-launch`, used to start the application you pick. Both come
   with Omarchy. Going through `uwsm-app` is what keeps launched apps out of the
   compositor's own systemd scope, which is the same path Omarchy's menu uses.
+- ImageMagick, for the backdrop — part of Omarchy's base set, nothing to add.
+
+## The backdrop
+
+The background is your own wallpaper, blurred. **This plugin never opens your
+wallpaper**, and the distinction is the whole design.
+
+A check that ends before a read cannot bind what the read consumes: the state
+link, and whatever it points at, can be replaced in between. Validating the
+pathname harder does not help, because a pathname is not what gets decoded.
+
+So [`bin/backdrop`](bin/backdrop) does the decoding instead. It resolves the
+link, refuses anything that is not a bounded regular file, and renders a small
+blurred JPEG into `$XDG_RUNTIME_DIR` under explicit ImageMagick resource limits
+and a timeout. The only pathname that reaches an image loader in the shell is
+that output — a file this plugin wrote. A hostile wallpaper costs a short-lived
+helper its timeout and leaves the previous backdrop on screen; it cannot reach
+the process that owns your desktop.
+
+It is also why opening is fast. The blur is applied to a 240×150 copy and
+scaled up rather than computed across the full frame, so a wallpaper that has
+not changed costs a `stat` and a string compare — single-digit milliseconds —
+and one that has costs about 60 ms. A bundled backdrop ships with the plugin and
+shows whenever the helper declines, so there is always something to look at.
 
 
 Applications come from `DesktopEntries`, Quickshell's own XDG `.desktop` index,
