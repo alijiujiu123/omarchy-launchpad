@@ -1,28 +1,16 @@
--- Background blur for the grid, for ~/.config/hypr/looknfeel.lua.
+-- Layer rule for the grid, for ~/.config/hypr/looknfeel.lua.
 --
--- The blur is the COMPOSITOR's. This plugin reads no wallpaper file of its own:
--- an earlier version loaded Omarchy's background image and blurred it in QML,
--- and doing that safely means checking a file whose path something else
--- controls -- a check that ends before the read cannot bind what the read
--- consumes. Asking the compositor to blur what is already behind the surface
--- removes the file, and with it the whole question.
+-- NO BLUR HERE. The plugin blurs the wallpaper itself, in QML, because it
+-- needs a radius it can animate from nothing up to full over the length of the
+-- opening -- and a compositor blur is a property of the layer, on or off, with
+-- no half of it. Asking for both would be paying twice for the same pixels,
+-- and the surface ends up opaque anyway, so there is nothing behind it left to
+-- see. `ignore_alpha` has nothing to govern either.
 --
--- `xray` makes the blur sample the WALLPAPER ONLY, ignoring windows. That is
--- both the look the QML version produced and much cheaper: without it the blur
--- is recomputed as windows behind it redraw.
---
--- `ignore_alpha` must stay BELOW the backdrop's own alpha (0.45 in
--- Launchpad.qml) or the compositor treats the surface as too transparent to
--- blur behind and the effect disappears entirely.
---
--- Requires blur enabled globally (`decoration.blur.enabled = true`); a
--- per-layer rule does nothing on its own.
---
--- KNOWN ISSUE, not caused by this plugin: with hyprbars installed, Hyprland
--- 0.56 flickers window title bars whenever blur runs and `decoration:rounding`
--- is non-zero. Hyprland's blur path invalidates the stencil buffer hyprbars
--- masks its rounded corners into, so the bar gets stencil-rejected for a few
--- frames -- most visible right after a full-screen blurred layer is torn down.
--- Upstream: hyprwm/hyprland-plugins#697. Omitting this rule avoids triggering
--- it, at the cost of an unblurred backdrop.
-hl.layer_rule({ match = { namespace = "launchpad" }, blur = true, xray = true, ignore_alpha = 0.25 })
+-- `no_anim` / `animation = "none"`: the plugin animates its own entrance and
+-- exit. Omarchy otherwise fades every layer surface in over 400ms and out over
+-- 150ms, which multiplies into the fade the plugin is already applying, and on
+-- the way out only STARTS once the surface unmaps -- after the plugin has
+-- finished fading it to nothing. Both keys are needed: `animation` picks the
+-- style, `no_anim` is what Hyprland checks for layer surfaces.
+hl.layer_rule({ match = { namespace = "launchpad" }, no_anim = true, animation = "none" })

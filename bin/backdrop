@@ -1,5 +1,5 @@
 #!/bin/sh
-# backdrop -- render a bounded, blurred copy of Omarchy's current wallpaper.
+# backdrop -- render a bounded, SHARP copy of Omarchy's current wallpaper.
 #
 # Prints "new" when it wrote a fresh copy, "cached" when the existing one is
 # still current, and nothing at all when it declined to do the work.
@@ -64,24 +64,36 @@ fi
 printf 'stale\n'
 
 mkdir -p "$dir"
+# The temporary name ends in the pid, so it carries no extension ImageMagick
+# could read a format out of -- hence the explicit `jpeg:` prefix on the output
+# below. Without it the encoder picks for itself, and it was picking WebP.
 tmp="$out.$$"
 
 # [0] takes the first frame only, so a multi-frame file cannot multiply the
 # work. The -limit values and the timeout bound everything else.
-# Blur the SMALL copy, not the big one. A 0x22 blur across 960x600 costs
-# ~150ms; the same look comes from blurring 240x150 and scaling that up, for
-# ~5ms. With `jpeg:size` letting libjpeg scale during decode as well, the whole
-# render drops from ~295ms to ~60ms -- measured on a 3160x2286 wallpaper, three
-# runs each, output indistinguishable (RMSE 0.002 against the slow version).
 #
+# NO BLUR HERE, on purpose. This used to hand QML a finished blurred pane,
+# which is cheap but fixed: the only thing left to animate was how dark it was,
+# so the overlay arrived with the blur already at full strength and then dimmed
+# -- the blur appeared, it never gathered. The compositor's own blur has the
+# same problem for the same reason; a layer is blurred or it is not, there is
+# no half. Handing over a sharp copy is what puts the radius in the plugin's
+# hands, where it can be run from nothing up to full over the length of the
+# opening and back down on the way out.
+#
+# 1280x800 because the result is going to be blurred into mush a few hundred
+# milliseconds later: it only has to hold up for the first frames, while it is
+# still nearly transparent and barely blurred. `jpeg:size` lets libjpeg scale
+# during decode, so a 5K wallpaper never arrives at full size in memory.
+#
+# No -modulate either. Darkening belongs to the tint the plugin draws on top,
+# where it is one number in one place rather than baked into the pixels.
 if timeout 15 magick \
       -limit memory 256MiB -limit map 256MiB -limit disk 512MiB -limit time 12 \
-      -define jpeg:size=480x300 \
+      -define jpeg:size=1280x800 \
       "$target[0]" -auto-orient \
-      -resize 240x150^ -gravity center -extent 240x150 \
-      -blur 0x6 \
-      -resize 960x600! -modulate 88,105,100 \
-      -quality 82 "$tmp" 2>/dev/null
+      -resize 1280x800^ -gravity center -extent 1280x800 \
+      -quality 82 "jpeg:$tmp" 2>/dev/null
 then
   # Atomic: QML can never see a half-written file.
   mv -f "$tmp" "$out"
