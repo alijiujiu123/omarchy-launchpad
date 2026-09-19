@@ -7,7 +7,14 @@ plugin.
 
 A full-screen page of app icons over your own wallpaper, blurred and dimmed,
 with a search pill at the top and page dots at the bottom. Type to filter, swipe
-or scroll to page, click to launch.
+or scroll to page, click to launch — or drive the whole thing from the keyboard
+without ever touching the pointer.
+
+It arrives the way macOS does it: the page contracts into place from slightly
+larger than the screen while the wallpaper behind it goes out of focus, and
+leaves by reversing that. Spreading four fingers apart closes it, and does so
+under the hand — the grid follows the fingers rather than waiting for a
+threshold.
 
 The page is a fixed **6 × 5** shape and every other dimension — cell, icon,
 label, padding — is derived from it and from the screen it is on. That is what
@@ -32,9 +39,11 @@ o.bind("SUPER + A", "Launchpad (app grid)",
 For the legacy (non-Lua) Hyprland config format, see
 [`install/bindings.conf`](install/bindings.conf).
 
-A touchpad gesture is optional and lives in
-[`install/gestures.lua`](install/gestures.lua): four-finger pinch in, the same
-gesture macOS uses.
+Touchpad gestures are optional and live in
+[`install/gestures.lua`](install/gestures.lua): four fingers together to open,
+which is the gesture macOS uses. Closing is not in that file — the plugin reads
+the spread itself, and a compositor gesture for it would fire at a threshold and
+cut the hand-tracked close short. See [Gestures](#gestures).
 
 `SUPER+A` rather than `SUPER+SPACE` because Omarchy's own launcher already owns
 that, and the two answer different questions — the launcher is for *I know what
@@ -63,17 +72,60 @@ yourself.
 | Key | Action |
 | --- | --- |
 | *(type anything)* | Filter by name or generic name, live |
-| `Enter` | Launch the first match |
-| `←` `→` | Previous / next page — but only when the search box is empty, so arrow keys still edit the text |
+| `←` `→` `↑` `↓` | Move the selection — but only when the search box is empty, so arrow keys still edit the text |
+| `Enter` | Launch the selected app |
+| `Shift` + `←` `→` | Previous / next page — again only with the search box empty, so `Shift`+arrow still selects text |
+| `Tab` / `Shift`+`Tab` | Previous / next page, whether or not you are searching |
+| `PageUp` / `PageDown` | Same, for keyboards that have those keys |
 | **Hold an icon** (or right-click it) | Enter jiggle mode — every icon gets a remove badge |
 | **Click a remove badge** | Uninstall that app, after a confirmation |
 | Click an icon while jiggling | Leave jiggle mode (it does **not** launch) |
 | `Esc`, click the backdrop | Back out one layer: dialog, then jiggle mode, then Launchpad |
+| **Four fingers apart** | Close, tracking the fingers — see [Gestures](#gestures) |
 
-It opens on the display you are working on, not on all of them at once.
+It opens on the display you are working on, not on all of them at once, and it
+opens on page one however you left it.
 
 Scroll or drag sideways to page; click a page dot to jump. A two-finger
-touchpad scroll in either axis pages too.
+touchpad scroll in either axis pages too, and one swipe is one page: the wheel
+deltas are accumulated until they pass a notch, then further scrolling is
+swallowed until the gesture stops. Only deltas large enough to be a finger still
+driving count as "not stopped" — libinput keeps sending decaying kinetic events
+for up to a second after the fingers lift, and letting those hold the lock open
+meant a second swipe landed on nothing.
+
+### The selection and the page are one thing
+
+There is a single highlight and `Enter` always launches whatever it is on. The
+page follows it in both directions: walking the selection off the right-hand
+edge turns the page, and turning the page by wheel, drag, dot or key moves the
+selection onto the page you arrived at. Without the second half, paging away
+would leave `Enter` pointing at an icon you can no longer see.
+
+Pointer and keyboard take turns rather than fighting: hovering an icon hands the
+selection to the pointer, pressing an arrow key takes it back. Hover is read on
+the way *in* only, so a cursor resting in the gap between two icons is not a
+request to deselect anything.
+
+A page that is turning does not count as hovering. Qt re-delivers hover when
+items move beneath a stationary cursor, so a turn sweeps thirty icons past the
+pointer in 220 ms and each one announces itself — including the ones on the page
+being left. Letting those through fed straight into the rule above and dragged
+the view back where it came from: the page would start to move, spring back, and
+paging felt like pushing against something. A pointer that has not moved is not
+hovering; the content is.
+
+### Why paging is not on `Ctrl` or `Super`
+
+Hyprland dispatches its own keybinds before the focused client sees the key, and
+holding exclusive keyboard focus does not change that — so any modifier the
+compositor has claimed is simply unreachable in here. In a stock Omarchy config
+that is `Super` + arrows (directional window focus), and in many setups `Ctrl` +
+arrows as well. Plain `Shift` + arrows is the one arrow combination nothing
+upstream tends to take. If your config does claim it, `Tab` always works.
+
+`PageUp` / `PageDown` are bound for completeness rather than as the answer: an
+Apple laptop keyboard has no such keys, only `Fn` + `↑` `↓`.
 
 `Enter` deliberately does nothing while the confirmation is up. An alert that
 uninstalls on the key you were already pressing to launch something is a trap,
@@ -123,7 +175,12 @@ Omarchy.
 - `uwsm-app` and `gtk-launch`, used to start the application you pick. Both come
   with Omarchy. Going through `uwsm-app` is what keeps launched apps out of the
   compositor's own systemd scope, which is the same path Omarchy's menu uses.
-- ImageMagick, for the backdrop — part of Omarchy's base set, nothing to add.
+- ImageMagick 7, for the backdrop — part of Omarchy's base set, nothing to add.
+  The helper calls `magick`; a system old enough to have only `convert` fails
+  the render and falls back to the bundled backdrop rather than erroring.
+- Qt 6.8 or newer. The grid relies on `Image.retainWhileLoading` to hold a
+  frame across the reload that a hide/show cycle forces — see
+  [Performance](#performance).
 
 ## The backdrop
 
@@ -135,43 +192,110 @@ link, and whatever it points at, can be replaced in between. Validating the
 pathname harder does not help, because a pathname is not what gets decoded.
 
 So [`bin/backdrop`](bin/backdrop) does the decoding instead. It resolves the
-link, refuses anything that is not a bounded regular file, and renders a small
-blurred JPEG into `$XDG_RUNTIME_DIR` under explicit ImageMagick resource limits
+link, refuses anything that is not a bounded regular file, and re-encodes a
+1280×800 JPEG into `$XDG_RUNTIME_DIR` under explicit ImageMagick resource limits
 and a timeout. The only pathname that reaches an image loader in the shell is
 that output — a file this plugin wrote. A hostile wallpaper costs a short-lived
 helper its timeout and leaves the previous backdrop on screen; it cannot reach
 the process that owns your desktop.
 
-It is also why opening is fast. The blur is applied to a 240×150 copy and
-scaled up rather than computed across the full frame, so a wallpaper that has
-not changed costs a `stat` and a string compare — single-digit milliseconds —
-and one that has costs about 60 ms. A bundled backdrop ships with the plugin and
-shows whenever the helper declines, so there is always something to look at.
+**The helper hands over a sharp copy, and the blur happens here.** That is a
+deliberate change from handing over a finished blurred pane, and the reason is
+motion: a pre-blurred image is one fixed amount of blur, so the most it can do
+is fade up, and a blur that fades up at full strength reads as the blur
+*appearing* rather than as the screen going out of focus. Blurring in QML makes
+the radius a number, and a number can be run from nothing to full over the
+length of the opening and back down on the way out.
 
+The cost of that choice is the render: about 395 ms for a wallpaper that has
+changed, against roughly 60 ms for the old blur-a-thumbnail-and-scale-it-up
+trick. It is paid almost never. An unchanged wallpaper is a `stat` and a string
+compare — 3 ms, measured — and the helper answers `stale` *before* it starts
+work, so the overlay opens immediately on the bundled backdrop and the new one
+fades in behind it. A bundled backdrop ships with the plugin and shows whenever
+the helper declines, so there is always something to look at.
 
 Applications come from `DesktopEntries`, Quickshell's own XDG `.desktop` index,
 so installs and removals are picked up live with no watcher and no cache of our
 own. Entries marked `NoDisplay` are skipped.
 
+## Motion
+
+Two timings, because the blur and the grid are not the same material.
+
+| | In | Out |
+| --- | --- | --- |
+| The grid — contract and fade | 320 ms | 240 ms |
+| The wallpaper's blur and dim | 380 ms | 340 ms |
+
+Three rules produce those numbers, and the sibling Mission Control overlay is
+timed off the same three, so the two read as parts of one desktop rather than as
+two programs that happen to share a screen:
+
+- **Arriving takes longer than leaving.** Something coming towards you is worth
+  watching; something going away has already said what it had to say.
+- **The atmosphere outlives the content.** The blur starts before the icons and
+  finishes after them, so the last thing on screen is a dissolve rather than a
+  cut.
+- **Translations accelerate away; fades taper.** A thing sliding off should look
+  like it is leaving. A thing dissolving should not — an accelerating fade puts
+  most of the alpha in the last few frames, which reads as a flash.
+
+The entrance is started on the first frame the surface actually renders, not on
+the frame it is told to appear. Mapping a layer surface, allocating the blur's
+buffers and uploading the icon textures costs about 100 ms here, every time,
+because the surface is torn down on every hide. Started at the earlier moment
+the animation clock ran through all of that with nothing on screen, and the
+first frame anyone saw was already a quarter of the way in.
+
+## Gestures
+
+Four fingers together opens it. That one has to go through the compositor:
+before the overlay exists there is no surface for a gesture to be delivered to,
+and a configured Hyprland gesture is a single action at a single threshold —
+there is no progress to read.
+
+Four fingers apart closes it, and that one is read here. Once the overlay is up
+it is an ordinary Wayland client holding pointer focus, and Hyprland forwards
+the pinch to it over `zwp_pointer_gestures_v1` — four fingers included, even
+while its own gesture config is watching the same pinch. So the close can follow
+the hand: the grid thins and spreads as the fingers part, and letting go past
+the commit point carries that straight on into the close instead of restarting
+it.
+
+Two details that are easy to get wrong:
+
+- **`PinchArea`, not `PinchHandler`.** A touchpad pinch arrives as a Wayland
+  native gesture, which has no touch points; the newer pointer handlers want
+  touch points and never fire. Measured side by side in the same window on the
+  same gestures: 370 events on `PinchArea`, 0 on `PinchHandler`.
+- **The direction names in Hyprland's gesture config are inverted** relative to
+  what the hand does. `pinchin` fires when the fingers move *apart* — the names
+  follow the zoom, not the gesture. [`install/gestures.lua`](install/gestures.lua)
+  therefore registers `pinchout` to mean fingers together, and says so.
+
+Do not also register a compositor gesture for closing. It will fire at its own
+threshold part-way through and cut the hand-tracked close off.
+
 ## Theming
 
-The backdrop is the **compositor's** blur of whatever is behind the grid — this
-plugin reads no wallpaper file of its own, so it always matches the current
-theme and background without being told. It needs the layer rule in
-[`install/looknfeel.lua`](install/looknfeel.lua) and blur enabled globally.
+The backdrop follows the current wallpaper without being told — the helper reads
+whatever the theme points at, and re-renders when it changes.
 
-Earlier versions loaded Omarchy's wallpaper and blurred it in QML. Doing that
-safely means validating a file whose path something else controls, and a check
-that finishes before the read cannot bind what the read consumes. Handing the
-job to the compositor removes the file and the question with it.
+Nothing has to be enabled for the blur. Earlier versions asked the compositor
+for it, which meant a `blur` layer rule *and* `decoration.blur.enabled` turned on
+globally, and gave a blur that could only be switched on or off. The plugin now
+blurs its own copy, so [`install/looknfeel.lua`](install/looknfeel.lua) carries
+one rule and that rule is cosmetic:
 
-**Known issue, not caused by this plugin.** With hyprbars installed, Hyprland
-0.56 flickers window title bars whenever blur runs and `decoration:rounding` is
-non-zero — its blur path invalidates the stencil buffer hyprbars masks its
-rounded corners into ([hyprwm/hyprland-plugins#697](https://github.com/hyprwm/hyprland-plugins/issues/697)).
-It is most visible just after this grid closes, because tearing down a
-full-screen blurred layer triggers a burst of blur passes. Leaving the layer
-rule out avoids triggering it, at the cost of an unblurred backdrop.
+```lua
+hl.layer_rule({ match = { namespace = "launchpad" }, no_anim = true, animation = "none" })
+```
+
+It tells Hyprland not to animate this layer, because the plugin animates itself.
+Without it the compositor's own 400 ms layer fade multiplies into the plugin's,
+and the entrance arrives through treacle. Leave it out and everything still
+works; it just looks worse.
 
 ## Performance
 
@@ -190,6 +314,29 @@ in memory.
 Being mounted is also why the search box and page index are reset explicitly on
 every open: the QML tree outlives any one opening, and Launchpad always opens on
 page one with an empty box.
+
+**Every dimension is derived from the screen, never from the window.** An
+unmapped `PanelWindow` is not the size of the screen it belongs to — it reports
+0×0 at the instant it maps and collapses to Qt's 100×100 default while hidden.
+Derived from the window, `iconSize` swung between its 32 px floor and 79 px
+twice per open; that is every icon's `sourceSize`, so all thirty `Image`s
+reloaded from scratch every single time. Measured, the first icon settled 65 ms
+after the surface appeared and the last one 300 ms after. What that looked like
+was the grid being read off disk one tile at a time, and it was not I/O at all.
+
+Two further things keep the icons still. `retainWhileLoading` holds the frame
+already on screen across the reload that moving between windows forces —
+`QQuickImageBase` reloads on that move because device pixel ratio may differ
+between windows, and it cannot assume otherwise. And a tile that has once had
+its artwork keeps it, rather than dropping to nothing whenever the status goes
+back to `Loading`.
+
+Every page is built and kept, rather than created as you turn to it. The
+`ListView` default `cacheBuffer` is 320 px against a page 1330 px wide, so
+turning a page meant creating thirty tiles and thirty `Image`s inside the 220 ms
+the turn was already animating — the turn stuttered from the work and the icons
+arrived after it. Built once, at login: with the geometry fixed the view has a
+real size while hidden, so all 132 tiles exist before the first open.
 
 ## Security
 
