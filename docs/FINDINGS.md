@@ -679,6 +679,54 @@ Two more consequences of reading the input rather than being told about it:
 at libinput's rate); a pointer's events have no such calibration, so a drag
 commits on travel or projection — half a page of pointer travel.
 
+## 24b. One writer per property, and a release you are told about
+
+The calibration above fixed *what* the thresholds were. It did not fix the
+mechanism, and the mechanism was wrong in two ways that together read as "no
+follow, the animation keeps pulling back":
+
+**Two writers on one property.** `contentX` was written while the fingers moved by
+the follow, and after they left by a `NumberAnimation` on the same property — and
+a *running* PropertyAnimation owns its property: assignments to it are overwritten
+on the next animation frame. So any settle still in flight when the next gesture
+began swallowed the follow completely. The rule that makes this impossible is the
+one the workspace swipe has by construction (the compositor is the only thing that
+moves the offset): **exactly one writer at a time**, and a gesture begins by
+*stopping* the settle and rebasing from the pixels on screen — the engine's own
+rule, "follow from wherever the value currently is". The follow is therefore
+relative to `baseContentX`, captured at the moment the fingers touch down, not to
+the current page's origin.
+
+**The release was inferred.** There was no end event, so a 90ms quiet gap stood in
+for one, plus a 250ms lock to stop the kinetic tail deciding a second page. Both
+were guesses about a stream that *does* say: a trackpad's axis events carry a
+phase, and Qt passes it through — `Qt.ScrollBegin` / `ScrollUpdate` / `ScrollEnd` /
+`Qt.ScrollMomentum`, which is `wl_pointer`'s `axis_source`/`axis_stop`, which is
+libinput telling the compositor and the compositor telling the client that the
+fingers have left. With a real end:
+
+- the follow runs from the first event to the last with nothing interrupting it,
+  and the decision happens **exactly once**, at the end — the lock is gone
+  entirely, because a lock cannot tell "the same swipe, still going" from "the
+  tail of a swipe that already decided", which is why it swallowed the follow for
+  the rest of the swipe;
+- the velocity is decayed only over the few milliseconds between the last sample
+  and the release, so the projection is a live part of the decision again instead
+  of being eaten by a fixed 90ms of silence;
+- `Qt.ScrollMomentum` after the end is *coast*, not fingers: ignored, and the
+  settle owns the page from the release on.
+
+Kept as fallbacks, because a stream without phases must still work: a first event
+with no `ScrollBegin` starts the gesture anyway, and a 400ms safety timer closes a
+gesture whose end never arrives. Both are documented as fallbacks in the code, not
+as the mechanism.
+
+**A mouse wheel is not a gesture** and no longer goes through this path at all: a
+detent is 120 `angleDelta` on the nose, Qt gives wheel events no begin and no end,
+and "how far has it moved" is not a question a notched device answers — so it
+takes a discrete page turn (one notch, one page, the same settle), and the earlier
+per-device unit normaliser is gone with it.
+
 ## 25. `NoSnap`, and why the view had to stop being authoritative
 
 `SnapOneItem` + `StrictlyEnforceRange` is what the 6 × 5 version carried, and it

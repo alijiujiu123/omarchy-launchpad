@@ -176,24 +176,23 @@ Item {
   //   floor      0.1 — a tenth of a page, the engine's proportion (60 of its
   //               centre's 600): 200 units, so a light touch is not a decision
   //               at all. It still follows — 3% of a page — and springs back.
-  //   decel      300 pages/s² — a flick's own speed (20-30 pages/s measured)
-  //               projects well past half a page even from a short travel. On
-  //               this path, though, the release is *inferred* from a quiet
-  //               stream, so the velocity has already decayed by the time it is
-  //               measured and the peak above carries most of the flick intent:
-  //               the client's honest stand-in for a release the compositor
-  //               would have seen.
+  //   decel      300 pages/s² — a flick's measured 20-30 pages/s projects past
+  //               half a page even from a short travel. With the release taken
+  //               from the protocol (`Qt.ScrollEnd`) the velocity is decayed only
+  //               over the few milliseconds between the last sample and the
+  //               release, so the projection is a live part of the decision --
+  //               when the release had to be guessed from a 90ms gap in the
+  //               stream, the decay ate most of it and the per-event peak alone
+  //               had to carry the flick.
   //   window     80 — ms, the recency-weighted velocity window (events arrive
   //               7-8ms apart, so this is about ten of them)
   //   speed      5 — the machine's settle speed: 100 x 5 = 500ms on the
   //               `momentumSettle` bezier, exactly what `looknfeel.lua` gives
   //               `workspaces`, so a page turn and a workspace swipe settle in
   //               the same time over the same distance
-  //   unitsPerPageWheel 120 — a MOUSE wheel is a different unit again: one
-  //               detent is 120 angleDelta on the nose, so a notch is a page.
-  //               Read per event (`event.device`), because the two devices
-  //               report quantities that are not comparable:
-  //               the choice is "a notch" vs "a movement"
+  //   (a MOUSE wheel does not go through any of this: a detent is 120 angleDelta
+  //    and a discrete step, so the wheel takes a page turn rather than a follow --
+  //    `scrolled` -- which is one notch per page whatever the trackpad's scale is)
   readonly property var paging: ({
     dist: 1.0,
     cancel: 0.5,
@@ -202,19 +201,12 @@ Item {
     window: 80,
     floor: 0.1,
     speed: 5,
-    unitsPerPage: 2000,
-    unitsPerPageWheel: 120
+    unitsPerPage: 2000
   })
 
-  // What one page is, for the device that produced this event. A wheel detent
-  // arrives as 120 whatever the trackpad's scale is, so the wheel needs its own
-  // normaliser -- and it is not a fudge factor: the two are different
-  // quantities, and each is converted to "pages" with the number measured for it.
-  function unitsFor(device) {
-    return (device && device.type === PointerDevice.Mouse)
-      ? root.paging.unitsPerPageWheel
-      : root.paging.unitsPerPage
-  }
+  // One page, in the units the trackpad reports. The mouse does not use this: a
+  // wheel detent is a discrete page turn, not a distance (see `scrolled`).
+  readonly property real unitsPerPage: root.paging.unitsPerPage
 
   // --- state --------------------------------------------------------------
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
@@ -1184,23 +1176,47 @@ Item {
         property real peak: 0
         property double lastEventMs: 0
         property bool gestureActive: false
-        // Set when a decision has been taken and cleared only after the stream
-        // has been quiet for a beat. A touchpad keeps sending kinetic events for
-        // up to a second after the fingers lift: without this, the tail of the
-        // swipe that just committed a page would start a fresh gesture and
-        // commit another one. Only events big enough to be a finger still
-        // driving extend it -- the same `force` number, from the same argument
-        // the old `momentumFloor` was tuned by.
-        property bool locked: false
+        // The page's pixel position when the fingers touched down: the follow is
+        // relative to this, so a gesture that interrupts a settle carries on from
+        // the pixels on screen (see `gestureStart`).
+        property real baseContentX: 0
+        // Set from the release until the next gesture begins. A touchpad keeps
+        // sending kinetic events for up to a second after the fingers lift, and
+        // those are coast, not fingers: they must not start a second gesture and
+        // decide a second page.
+        //
+        // This replaces a 250ms lock released by event size, which is what made
+        // the follow disappear for the rest of a swipe -- the lock could not tell
+        // "the same swipe, still going" from "the tail of a swipe that already
+        // decided", so it swallowed both, and the page sat still while the settle
+        // animated.
+        property bool coasting: false
 
         function pageWidth() { return Math.max(1, pages.width) }
         function maxContentX() { return Math.max(0, (root.pageCount - 1) * stage.pageWidth()) }
 
+        // ONE WRITER AT A TIME, which is the rule this property needs and the
+        // reason paging first came out as "no follow, the animation keeps
+        // pulling back": `contentX` is written while the fingers are down by
+        // `applyFollow`, and by `settleAnim` after they leave. A running
+        // NumberAnimation owns its property -- assignments to it are
+        // overwritten on the next animation frame -- so a settle that is still
+        // in flight when the next gesture starts swallows the whole follow.
+        // The workspace swipe on this machine never has that problem because
+        // the compositor is the single owner of the offset, and it is why the
+        // gesture is started by *stopping* the settle here and in no other way.
+        //
+        // `baseContentX` is where the page actually is at the moment the
+        // fingers touch: the engine's own rule ("follow from wherever the value
+        // currently is -- a second gesture during a settle should carry on from
+        // the pixels on screen"). Without it, starting a gesture mid-settle
+        // snapped the page to the nearest page before following.
         function gestureStart(nowMs) {
           settleAnim.stop();
-          stage.locked = false;
-          lockTimer.stop();
+          safetyTimer.stop();
           stage.gestureActive = true;
+          stage.coasting = false;
+          stage.baseContentX = pages.contentX;
           stage.travel = 0;
           stage.velocity = 0;
           stage.peak = 0;
@@ -1241,29 +1257,47 @@ Item {
         function applyFollow() {
           const w = stage.pageWidth();
           const progress = Math.max(-1, Math.min(1, stage.travel / root.paging.dist));
+          // From the pixels the gesture started on, not from the current page's
+          // origin: a gesture that begins while a settle is still in flight
+          // carries on from there instead of jumping.
           pages.contentX = Math.max(0, Math.min(stage.maxContentX(),
-                                               pages.currentIndex * w - progress * w));
+                                               stage.baseContentX - progress * w));
         }
 
         // The release. Decided by where the motion WOULD have come to rest
         // rather than by where it stopped: the engine's projection, then its
         // half-over rule, its flick rule and its travel floor.
+        //
+        // Called once per gesture, from the event that says the fingers have
+        // left (`Qt.ScrollEnd`, which is `wl_pointer`'s `axis_stop`; a
+        // `DragHandler`'s own release for a pointer drag; the safety timer for a
+        // stream that reports neither). It is NOT inferred from a quiet gap any
+        // more: that inference is what made a swipe decide two or three times,
+        // each decision fighting the follow with a settle animation.
         function gestureRelease(nowMs) {
           if (!stage.gestureActive)
             return;
           stage.gestureActive = false;
+          stage.coasting = true;
 
           // The stretch between the last motion and the release counts as no
           // motion: a hand that came to rest before letting go must not commit
-          // on stale velocity. (The compositor half does exactly this in
-          // `onFinish`; here the release is inferred from a quiet stream, so the
-          // same decay is what makes the inference honest.)
+          // on stale velocity (the compositor half does exactly this in
+          // `onFinish`). With a real end event this gap is the time between the
+          // last sample and the release itself, which is short -- on the
+          // inferred path it was a fixed 90ms of silence, and that is most of
+          // why the projection never had a say here.
           let v = stage.velocity;
           if (stage.lastEventMs > 0 && nowMs > stage.lastEventMs)
             v = MM.approach(v, 0, nowMs - stage.lastEventMs, root.paging.window);
 
           const w = stage.pageWidth();
-          const stay = () => stage.settleTo(pages.currentIndex * w, false);
+          // Where the page is *now*, rounded: with a real end event the
+          // contentX is either a page boundary or wherever a previous settle was
+          // interrupted, and rounding to the nearest page is what makes both
+          // cases land on a page.
+          const from = Math.max(0, Math.min(root.pageCount - 1, Math.round(pages.contentX / w)));
+          const stay = () => stage.settleTo(from * w, false);
 
           const projected = MM.projectDelta(stage.travel, v, root.paging.decel);
           if (MM.decide(stage.travel, projected, stage.peak, root.paging) === "stay") {
@@ -1274,15 +1308,12 @@ Item {
           // The direction is the SIGN OF THE PROJECTION, not of where the
           // fingers stopped -- the engine's `decide` returns its verdict by the
           // same rule. Positive travel is the previous page.
-          const want = pages.currentIndex + (projected > 0 ? -1 : 1);
+          const want = from + (projected > 0 ? -1 : 1);
           if (want < 0 || want > root.pageCount - 1) {
             stay();
             return;
           }
-          // The decision is latched for the length of the tail, and the settle
-          // is the machine's own: 100 x speed ms on `momentumSettle`.
-          stage.locked = true;
-          lockTimer.restart();
+          // The settle is the machine's own: 100 x speed ms on `momentumSettle`.
           stage.settleTo(want * w, true);
         }
 
@@ -1328,46 +1359,78 @@ Item {
           stage.settleTo(want * stage.pageWidth(), true);
         }
 
-        // A wheel event is already in units of travel, but *which* units depends
-        // on the device that produced it: a mouse wheel counts in detents (120
-        // to a notch) and a trackpad in movements about an order of magnitude
-        // larger. `unitsFor` normalises each to one page, so everything
-        // downstream stays in pages.
-        function scrolled(delta, device) {
+        // A trackpad's events are already in units of travel: `unitsPerPage`
+        // converts them to pages (a mouse wheel is a discrete notch and takes
+        // the other branch below).
+        //
+        // `phase` is the other half of that normalising, and the important one:
+        // it is where a gesture BEGINS and ENDS, straight from the protocol
+        // (`wl_pointer`'s `axis_source`/`axis_stop`, which libinput reports from
+        // the touchpad itself), so the release is a fact rather than a guess.
+        // The three phases mean what they say:
+        //
+        //   Begin    the fingers touched down (or a wheel detent started)
+        //   Update   still driving -- follow it, 1:1
+        //   End      the fingers are off: decide, once, and settle
+        //   Momentum the coast that follows an End: ignored
+        //
+        // That is the same information the three-finger workspace swipe gets
+        // from the compositor, and without it this state machine had to invent a
+        // release from a 90ms gap in the stream: a real swipe could be cut into
+        // two or three "gestures", each one deciding and animating, which is what
+        // "no follow, the animation keeps pulling back" was.
+        function scrolled(delta, device, phase) {
           // Paging stays live in edit mode -- macOS pages while jiggling, and
           // blocking it would mean you can only remove apps from whichever page
           // you happened to be on. Only the modal dialog stops it.
           if (root.pageCount <= 1 || root.uninstallTarget)
             return;
 
-          const pages_ = delta / root.unitsFor(device);
-          if (stage.locked) {
-            // Inside the tail of a gesture that has already decided. Swallow it,
-            // and only let something still driving hold the lock open.
-            if (Math.abs(pages_) >= root.paging.force)
-              lockTimer.restart();
+          // A mouse wheel is not a gesture. One detent is a whole page, Qt gives
+          // wheel events `ScrollUpdate` and nothing else (no begin, no end), and
+          // "how far has it moved" is not a question a notched device answers --
+          // so it is a discrete page turn: the same settle a gesture's release
+          // gets, minus the follow. One notch, one page.
+          if (device && device.type === PointerDevice.Mouse) {
+            if (delta === 0)
+              return;
+            stage.goTo(pages.currentIndex + (delta > 0 ? -1 : 1));
             return;
           }
-          releaseTimer.restart();
+
+          // Everything else here is a trackpad: continuous, with a real begin and
+          // end from the protocol.
+          const pages_ = delta / root.paging.unitsPerPage;
+
+          if (phase === Qt.ScrollMomentum) {
+            // The coast after the fingers left. If a gesture is still open here
+            // (a backend that reports the end as Momentum) it ends now; either
+            // way this event is not the fingers and must not follow or decide.
+            if (stage.gestureActive)
+              stage.gestureRelease(Date.now());
+            return;
+          }
+          if (stage.coasting && phase !== Qt.ScrollBegin)
+            return;   // still inside the tail of the gesture that has decided
+          if (!stage.gestureActive)
+            stage.gestureStart(Date.now());
+
           stage.gestureFeed(pages_, Date.now());
+
+          if (phase === Qt.ScrollEnd)
+            stage.gestureRelease(Date.now());
+          else
+            safetyTimer.restart();
         }
 
-        // The release of an input that has no end event of its own: a wheel
-        // stream simply stops. Short enough to feel immediate, long enough to sit
-        // between the events of one burst (the touchpad's tail arrives at about
-        // 8ms spacing).
+        // For a stream that never says it ended -- a backend that reports no
+        // phase at all. It is a *fallback*, not the mechanism: long enough not to
+        // interrupt a swipe that is merely being sampled slowly, and only ever
+        // consulted when no `ScrollEnd` arrived.
         Timer {
-          id: releaseTimer
-          interval: 90
-          onTriggered: stage.gestureRelease(Date.now())
-        }
-
-        // Outlasts the kinetic tail of the gesture that just committed -- the
-        // value the old paging cooldown had tuned, for the same reason.
-        Timer {
-          id: lockTimer
-          interval: 250
-          onTriggered: stage.locked = false
+          id: safetyTimer
+          interval: 400
+          onTriggered: if (stage.gestureActive) stage.gestureRelease(Date.now()); else stage.coasting = false
         }
 
         NumberAnimation {
@@ -1385,17 +1448,18 @@ Item {
         // Two handlers, because WheelHandler.orientation defaults to Qt.Vertical
         // and silently drops horizontal wheel events -- which is why a sideways
         // two-finger swipe did nothing while an up/down one paged fine. The
-        // device goes through with the delta, because the units do (`unitsFor`).
+        // device and the phase go through with the delta, because which branch
+        // applies and where the gesture ends both depend on them.
         WheelHandler {
           orientation: Qt.Horizontal
           acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-          onWheel: event => stage.scrolled(event.angleDelta.x, event.device)
+          onWheel: event => stage.scrolled(event.angleDelta.x, event.device, event.phase)
         }
 
         WheelHandler {
           orientation: Qt.Vertical
           acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-          onWheel: event => stage.scrolled(event.angleDelta.y, event.device)
+          onWheel: event => stage.scrolled(event.angleDelta.y, event.device, event.phase)
         }
 
         // Click-and-drag / finger drag. The page follows the pointer 1:1 -- a
@@ -1498,12 +1562,14 @@ Item {
                 // stale velocity is a decision waiting to be made about a page
                 // the user has not touched.
                 settleAnim.stop();
+                safetyTimer.stop();
                 stage.gestureActive = false;
-                stage.locked = false;
+                stage.coasting = false;
                 stage.travel = 0;
                 stage.velocity = 0;
                 stage.peak = 0;
                 stage.lastEventMs = 0;
+                stage.baseContentX = 0;
                 stage.turning = false;
                 pages.currentIndex = 0;
                 pages.contentX = 0;

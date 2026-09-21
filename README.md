@@ -126,6 +126,26 @@ hand** — 1:1, not in jumps — and letting go decides where it lands:
 - whatever does not commit springs back, and whatever does settles on the same
   curve and duration the three-finger workspace swipe uses.
 
+**The release comes from the protocol, not from a gap in the stream.** A
+trackpad's axis events carry a phase, and Qt passes it through (`Qt.ScrollBegin`
+/ `ScrollUpdate` / `ScrollEnd` / `ScrollMomentum`, from `wl_pointer`'s
+`axis_source` and `axis_stop` — which is libinput telling the compositor, and the
+compositor telling the client, that the fingers have left). So a gesture has a
+real beginning and a real end: the page follows from the first event to the last
+and decides exactly once, at the end. That is the same information the
+three-finger workspace swipe gets from the compositor, and the difference is
+visible — with the release guessed from a 90ms quiet gap instead, one swipe was
+cut into two or three "gestures", each one deciding and settling, and the page
+spent the swipe being animated back rather than following.
+
+There is exactly **one writer** on the page's position at any moment: the follow
+while the fingers are down, the settle after they leave. A running
+`NumberAnimation` owns its property — assignments to it are overwritten on the
+next frame — so a settle still in flight when the next gesture starts would
+swallow the whole follow; the gesture begins by *stopping* it and taking over
+from the pixels on screen, which is the engine's own rule ("follow from wherever
+the value currently is").
+
 **The units are measured, not derived.** `angleDelta` is not the compositor's
 delta — Qt reports a trackpad's continuous axis events about an order of
 magnitude larger than Hyprland's — so the thresholds were placed after recording
@@ -155,18 +175,18 @@ Two consequences worth knowing:
 
 - **One swipe is one page.** The page never runs further than one page ahead of
   where the fingers started, however hard the flick is; a second page needs a
-  second gesture. A trackpad's kinetic tail is followed like any other motion and
-  then swallowed: once a gesture has decided, further events are ignored until
-  the stream has been quiet for 250 ms, and only events above the flick
-  threshold hold that shut — so one swipe cannot decide twice.
-- **A mouse wheel notch is a page, and a trackpad is not a wheel.** A detent is
-  120 `angleDelta` on the nose, while a deliberate trackpad swipe accumulates
-  about 2000 — the two devices report quantities that are not comparable, so
-  each is normalised with the number measured for it (`unitsPerPageWheel` vs
-  `unitsPerPage`, chosen per event from `event.device`). A pointer drag has no
-  flick rule — that threshold is a per-event quantity and was measured on the
-  touchpad's event stream, which a pointer's events have no calibration for — so
-  a drag commits on travel or projection: half a page of pointer travel.
+  second gesture. The kinetic tail after the release arrives tagged
+  `ScrollMomentum` and is ignored: it is coast, not fingers, and the settle owns
+  the page from the release on.
+- **A mouse wheel notch is a page turn, and not a gesture at all.** A detent is
+  120 `angleDelta` on the nose and Qt gives wheel events no begin and no end, so
+  a wheel takes the discrete route (one notch, one page, the same settle) rather
+  than the follow — "how far has it moved" is not a question a notched device
+  answers, and 120 is not comparable with the ~2000 a trackpad swipe
+  accumulates. A pointer drag does take the follow, and has no flick rule: that
+  threshold is a per-event quantity measured on the touchpad's event stream,
+  which a pointer's events have no calibration for, so a drag commits on travel
+  or projection — half a page of pointer travel.
 
 ### The selection and the page are one thing
 
