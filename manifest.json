@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "io.github.andyweiboan.launchpad",
   "name": "Launchpad",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "Andy Wei",
-  "description": "macOS-style app grid: a full-screen page of icons over your own wallpaper, blurred, with search and page dots",
+  "description": "macOS-style app grid: a full-screen 7 x 5 page of icons over your own wallpaper, blurred, with search and page dots",
   "kinds": [
     "overlay"
   ],
@@ -13,5 +13,5 @@
     "overlay": "Launchpad.qml"
   },
   "license": "MIT",
-  "homepage": "https://github.com/AndyWeiBoan/omarchy-launchpad"
+  "homepage": "https://github.com/alijiujiu123/omarchy-launchpad"
 }

@@ -3,7 +3,26 @@
 A macOS-style application grid for [Omarchy](https://omarchy.org), as a shell
 plugin.
 
-![Launchpad showing a six-by-five grid of application icons over the blurred desktop wallpaper, with a search pill at the top and three page dots at the bottom](preview.png)
+> **This is a fork.** Upstream is
+> [`AndyWeiBoan/omarchy-launchpad`](https://github.com/AndyWeiBoan/omarchy-launchpad)
+> (MIT, and still this plugin's owner: the grid, the icons, the entrance, the
+> hand-tracked close and the uninstall delegation are all theirs), kept here as
+> the `upstream` remote. Two things changed in this fork, both from the same
+> brief — *match macOS's own Launchpad more closely, and page it the way the
+> three-finger workspace swipe moves*:
+>
+> - **the page is 7 × 5 instead of 6 × 5**, and the margins and bands around it
+>   were tightened so the icons are larger and closer together;
+> - **paging runs on the kit's motion engine** instead of an accumulator: the
+>   page follows the fingers and the release is decided by where the motion
+>   would have come to rest.
+>
+> The plugin id stays `io.github.andyweiboan.launchpad` on purpose, so an
+> existing install (and the config blocks that name it) keep working. Install
+> this fork with the URL below; `omarchy plugin update <id>` then follows this
+> repository.
+
+![Launchpad showing a seven-by-five grid of application icons over the blurred desktop wallpaper, with a search pill at the top and three page dots at the bottom](preview.png)
 
 A full-screen page of app icons over your own wallpaper, blurred and dimmed,
 with a search pill at the top and page dots at the bottom. Type to filter, swipe
@@ -16,16 +35,24 @@ leaves by reversing that. Spreading four fingers apart closes it, and does so
 under the hand — the grid follows the fingers rather than waiting for a
 threshold.
 
-The page is a fixed **6 × 5** shape and every other dimension — cell, icon,
+The page is a fixed **7 × 5** shape and every other dimension — cell, icon,
 label, padding — is derived from it and from the screen it is on. That is what
 makes it read as Launchpad rather than as a generic app menu, and it is why
 there is one window per screen: a 5K monitor and a laptop panel each size their
 own grid instead of sharing one pixel-fixed icon size.
 
+Seven is not a preference: it is what macOS's own Launchpad draws on a laptop
+panel, measured off Apple's help screenshot for it (seven columns, five rows,
+icons about 0.7 of the column pitch). At six columns on a 1440 × 900 panel the
+cell was 211 × 144 and the icon could only be 42% of the pitch it sat in, which
+is what made the page read as a sparse grid floating in the middle of the screen
+with both margins empty; seven columns at the same height brings the cell within
+10% of square and the icon to 55% of the pitch.
+
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/AndyWeiBoan/omarchy-launchpad --enable
+omarchy plugin add https://github.com/alijiujiu123/omarchy-launchpad --enable
 ```
 
 Then bind a key — plugins cannot bind keys themselves. In
@@ -86,13 +113,44 @@ yourself.
 It opens on the display you are working on, not on all of them at once, and it
 opens on page one however you left it.
 
-Scroll or drag sideways to page; click a page dot to jump. A two-finger
-touchpad scroll in either axis pages too, and one swipe is one page: the wheel
-deltas are accumulated until they pass a notch, then further scrolling is
-swallowed until the gesture stops. Only deltas large enough to be a finger still
-driving count as "not stopped" — libinput keeps sending decaying kinetic events
-for up to a second after the fingers lift, and letting those hold the lock open
-meant a second swipe landed on nothing.
+Scroll or drag sideways to page; click a page dot to jump. Both a two-finger
+touchpad scroll (either axis) and a pointer drag **move the page under your
+hand** — 1:1, not in jumps — and letting go decides where it lands:
+
+- the travel is projected to where it *would* have come to rest (constant
+  deceleration, `v²/2a`, on a recency-weighted velocity of the last few tens of
+  milliseconds);
+- it commits if that projection crossed **half a page**, or if a single event
+  moved faster than one eighth of a page (the flick rule);
+- nothing counts below **a tenth of a page**, so a twitch is not a decision;
+- whatever does not commit springs back, and whatever does settles on the same
+  curve and duration the three-finger workspace swipe uses.
+
+That is the kit's motion engine, not a paging heuristic: `MotionMath.js` is
+imported from `~/.config/omarchy/motion/` (installed by the kit's `motion`
+module) and the parameters above live in the plugin's `paging` record in the
+engine's own vocabulary. A page turn and a workspace swipe travel the same
+distance in the same time — 500 ms on `momentumSettle` — because it is the same
+algebra.
+
+Two consequences worth knowing:
+
+- **One swipe is one page.** The page never runs further than one page ahead of
+  where the fingers started, however hard the flick is; a second page needs a
+  second gesture.
+- **A wheel notch is a page.** One detent is 120 client units, which is exactly
+  one page of travel, so a mouse wheel pages one notch at a time (and, being a
+  single event above the flick threshold, commits immediately). A pointer drag
+  has no flick rule — that threshold is a per-event quantity and was measured on
+  the touchpad's event stream, which a pointer's events have no calibration for —
+  so a drag commits on travel or projection: half a page of pointer travel.
+
+A touchpad's kinetic tail — libinput keeps sending decaying events for up to a
+second after the fingers lift — is followed like any other motion, and then
+swallowed: once a gesture has decided, further events are ignored until the
+stream has been quiet for 250 ms, and only events large enough to be a finger
+still driving hold that shut. Without it, the tail of the swipe that just
+committed a page would decide a second one.
 
 ### The selection and the page are one thing
 
@@ -336,7 +394,8 @@ Every page is built and kept, rather than created as you turn to it. The
 turning a page meant creating thirty tiles and thirty `Image`s inside the 220 ms
 the turn was already animating — the turn stuttered from the work and the icons
 arrived after it. Built once, at login: with the geometry fixed the view has a
-real size while hidden, so all 132 tiles exist before the first open.
+real size while hidden, so the whole grid — 35 tiles per page — is built before
+the first open.
 
 ## Security
 

@@ -11,6 +11,17 @@
 // grid instead of sharing one pixel-fixed icon size. nwg-drawer was the first
 // attempt and could not do any of those three things.
 //
+// 7 x 5, and that is macOS's own shape on a laptop panel: Apple's help
+// screenshot of Launchpad measures seven columns, five rows, with the icons
+// about 0.70 of the column pitch. Six columns was what this plugin shipped with
+// first, and at 6 x 5 on a 1440 x 900 panel the cell is 211 x 144 -- so the
+// icon could only be 42% of the 211-wide pitch it sat in, and the page read as
+// a sparse grid floating in the middle of the screen with the margins either
+// side of it empty. Seven columns at the same height puts the cell much closer
+// to square (195 x 154) and the icon at 55% of the pitch, which is the most a
+// 16:10 screen allows once five rows, the search band and the dots have taken
+// their share. Bigger icons, closer together: that is what fills the page.
+//
 // This is an `overlay` plugin with keepLoaded: true, so the shell mounts it at
 // startup and it stays mounted. That is not a detail. An earlier standalone
 // version launched per keypress and took ~340ms before anything appeared, of
@@ -21,6 +32,24 @@
 //
 // Being resident is also why several things below reset explicitly rather than
 // relying on construction: the QML tree outlives any one opening.
+//
+// Paging runs on the kit's motion engine. `~/.config/omarchy/motion/` (installed
+// by the `motion` module) is the algebra the three-finger workspace swipe is
+// tuned from: the page follows the fingers 1:1, the release is decided by *where
+// the motion would have come to rest* -- v^2/2a on a recency-weighted velocity,
+// the half-over rule, a per-event flick threshold, a travel floor -- and
+// whatever is not committed settles back on the machine's own curve (100 x
+// `speed` ms on `momentumSettle`, the same bezier `looknfeel.lua` gives
+// `workspaces`). None of that is re-implemented here: MotionMath.js is imported
+// from the engine and the gesture's parameters are written in its vocabulary
+// (`dist`, `cancel`, `force`, `decel`, `window`, `floor`, `speed`). A page turn
+// and a workspace swipe travel the same distance in the same time, which is the
+// point of sharing it.
+//
+// What it replaced was an accumulator: a two-finger scroll summed deltas until
+// they passed one notch and then jumped a whole page, and a drag committed at a
+// twelfth of the screen without the page ever moving under the hand. That is
+// the same job done with none of the feel.
 
 import QtQuick
 import QtQuick.Effects
@@ -28,6 +57,11 @@ import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
+// The motion engine's shell half. Relative on purpose: Quickshell's package
+// tree is read-only and blackholes anything outside it, so this is the only way
+// a plugin reaches the engine -- the same relative import the engine's own
+// MotionFollow uses, and the arrangement `modules/motion` documents.
+import "../../motion/MotionMath.js" as MM
 
 Item {
   id: root
@@ -97,11 +131,53 @@ Item {
   }
 
   // --- page shape ---------------------------------------------------------
-  // Everything else -- cell size, icon size, fonts -- derives from these and
-  // the screen, which is what keeps it sharp on both monitors.
-  readonly property int columns: 6
+  // macOS's own shape for a laptop panel, and every other dimension -- cell,
+  // icon, label, the bands -- derives from these two and the screen, which is
+  // what keeps it sharp on both monitors. See the header for why seven.
+  readonly property int columns: 7
   readonly property int rows: 5
   readonly property int perPage: columns * rows
+
+  // --- paging: one page of travel, and how a release decides --------------
+  // The motion engine's parameter names and meanings (compare `M.params` in
+  // ~/.config/hypr/motion.lua and `motion`'s own output), with the units chosen
+  // so that BOTH inputs this page accepts are the same quantity: the fraction of
+  // a page the content has moved. That is what makes `cancel` (the half-over
+  // rule) mean "half a page" for a two-finger scroll and for a pointer drag
+  // alike, without either of them needing its own thresholds.
+  //
+  //   dist  1.0        — one page, because travel is already in pages
+  //   cancel 0.5       — the half-over rule, the engine's default and what
+  //                      Hyprland's own workspace swipe falls back to
+  //   force  0.125     — one event moving an eighth of a page may decide on its
+  //                      own (the flick rule). That is 15 client units/event,
+  //                      which is what this plugin's `momentumFloor` measured
+  //                      as "a finger still driving" rather than a kinetic tail
+  //   decel  200       — pages/s^2. A touchpad flick measures ~15.6 pages/s, so
+  //                      it projects 0.61 pages and commits; a moderate swipe
+  //                      (3.3 pages/s) projects 0.03 and does not, which is the
+  //                      same split the workspace swipe has
+  //   window 80        — ms, the recency-weighted velocity window
+  //   floor  0.1       — a tenth of a page, the engine's proportion (60 of its
+  //                      centre's 600): below that nothing counts as a decision
+  //   speed  5         — the machine's settle speed: 100 x 5 = 500ms on the
+  //                      `momentumSettle` bezier, exactly what `looknfeel.lua`
+  //                      gives `workspaces`, so a page turn and a workspace
+  //                      swipe settle in the same time over the same distance
+  //   unitsPerPage 120 — client angleDelta in one page: 1500 compositor units
+  //                      (the workspace swipe's `distance`) x `scroll_factor`
+  //                      0.08. The number this plugin had already tuned as its
+  //                      wheel notch, arrived at from the other direction
+  readonly property var paging: ({
+    dist: 1.0,
+    cancel: 0.5,
+    force: 0.125,
+    decel: 200,
+    window: 80,
+    floor: 0.1,
+    speed: 5,
+    unitsPerPage: 120
+  })
 
   // --- state --------------------------------------------------------------
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
@@ -759,17 +835,36 @@ Item {
       readonly property real screenW: panel.modelData ? panel.modelData.width : panel.width
       readonly property real screenH: panel.modelData ? panel.modelData.height : panel.height
 
-      readonly property real sidePad: Math.round(panel.screenW * 0.06)
-      readonly property real searchBand: Math.round(panel.screenH * 0.13)
-      readonly property real dotsBand: Math.round(panel.screenH * 0.07)
+      // Bands and margins, all as fractions of the screen so both monitors size
+      // their own page. What changed from the 6 x 5 layout, and why:
+      //
+      //   sidePad   6%  -> 2.5%. The macOS screenshot's outer margin and ours
+      //             were already the same order of magnitude; the emptiness was
+      //             never the margin, it was the icon-to-pitch ratio. Tightening
+      //             it further is what buys the extra pitch that makes the cells
+      //             near square.
+      //   searchBand 13% -> 9.5% and dotsBand 7% -> 5%. Twenty percent of the
+      //             height was reserved for a 32px pill and an 8px row of dots.
+      //             Every point taken back here goes into cellH, and cellH is
+      //             what caps the icon on a 16:10 panel.
+      readonly property real sidePad: Math.round(panel.screenW * 0.025)
+      readonly property real searchBand: Math.round(panel.screenH * 0.095)
+      readonly property real dotsBand: Math.round(panel.screenH * 0.05)
       readonly property real gridW: panel.screenW - sidePad * 2
       readonly property real gridH: panel.screenH - searchBand - dotsBand
       readonly property real cellW: gridW / root.columns
       readonly property real cellH: gridH / root.rows
-      // Icon takes most of the cell's height, leaving the label and the gaps
-      // their room; the width term only binds on a screen that is very wide but
-      // short, where a cell is much wider than it is tall.
-      readonly property int iconSize: Math.max(32, Math.round(Math.min(cellW * 0.50, cellH * 0.62)))
+      // Both terms are live on this machine, which is what makes it stable
+      // across screens rather than tuned to one: on a 1440 x 900 panel
+      // (cellW 195, cellH 154) the width term wants 107 and the height term
+      // wants 108, so the icon is 107 either way. The width term is what stops
+      // a very wide, short screen from making cells wider than they are tall.
+      //
+      // 0.55 of the pitch, against macOS's 0.70: the rest of that ratio is the
+      // label and the gap under it. Five rows on a 16:10 panel do not leave
+      // room for both a macOS-sized icon and its name -- and the name is worth
+      // more here, because Linux entries are longer than macOS's.
+      readonly property int iconSize: Math.max(32, Math.round(Math.min(cellW * 0.55, cellH * 0.70)))
       readonly property int labelSize: Math.max(10, Math.round(iconSize * 0.15))
       // NO wallpaper image, and no blur of our own. The compositor blurs
       // whatever is actually behind this surface -- windows included -- which is
@@ -1022,56 +1117,184 @@ Item {
           onTapped: root.back()
         }
 
+        // --- paging: the engine's algebra ---------------------------------
+        // Two inputs page this grid -- a two-finger scroll (or a wheel) and a
+        // pointer/finger drag -- and both of them run the same state machine:
+        // follow while the input moves, decide on release, settle on the
+        // machine's curve. The quantities are in PAGES, so neither input needs
+        // thresholds of its own; `root.paging` carries the parameters and why
+        // they are what they are.
+        //
         // True from the moment a page turn is asked for until the slide has
         // landed. Nothing that happens *because* the content is moving may
         // change the selection while this is set -- see the tile's HoverHandler.
         property bool turning: false
+
+        // Set while the fingers are driving and until the settle has landed, so
+        // a turn that is still in flight keeps the hover guard up.
         Timer {
           id: turnSettle
-          interval: pages.highlightMoveDuration + 40
+          interval: MM.settleMs(root.paging.speed) + 40
           onTriggered: stage.turning = false
         }
 
+        // The gesture's state. Signed the way the input reports it -- positive is
+        // content pulled to the right, i.e. toward the PREVIOUS page -- which is
+        // the engine's own convention (the sign says which way the motion went,
+        // the consumer reads the direction it cares about).
+        property real travel: 0
+        property real velocity: 0
+        property real peak: 0
+        property double lastEventMs: 0
+        property bool gestureActive: false
+        // Set when a decision has been taken and cleared only after the stream
+        // has been quiet for a beat. A touchpad keeps sending kinetic events for
+        // up to a second after the fingers lift: without this, the tail of the
+        // swipe that just committed a page would start a fresh gesture and
+        // commit another one. Only events big enough to be a finger still
+        // driving extend it -- the same `force` number, from the same argument
+        // the old `momentumFloor` was tuned by.
+        property bool locked: false
+
+        function pageWidth() { return Math.max(1, pages.width) }
+        function maxContentX() { return Math.max(0, (root.pageCount - 1) * stage.pageWidth()) }
+
+        function gestureStart(nowMs) {
+          settleAnim.stop();
+          stage.locked = false;
+          lockTimer.stop();
+          stage.gestureActive = true;
+          stage.travel = 0;
+          stage.velocity = 0;
+          stage.peak = 0;
+          stage.lastEventMs = nowMs;
+        }
+
+        // One event of the gesture. `deltaPages` is this event's travel as a
+        // fraction of a page, whatever produced it.
+        function gestureFeed(deltaPages, nowMs) {
+          if (!stage.gestureActive)
+            stage.gestureStart(nowMs);
+          const dt = (stage.lastEventMs > 0 && nowMs > stage.lastEventMs) ? (nowMs - stage.lastEventMs) : 0;
+          stage.travel += deltaPages;
+          if (Math.abs(deltaPages) > stage.peak)
+            stage.peak = Math.abs(deltaPages);
+          // Recency-weighted velocity in pages per second, through the engine's
+          // own exponential approach: the compositor half calls this
+          // `advanceVelocity` with the same time constant, and MotionMath.js is
+          // that same code written for the shell.
+          if (dt > 0)
+            stage.velocity = MM.approach(stage.velocity, deltaPages / (dt / 1000), dt, root.paging.window);
+          stage.lastEventMs = nowMs;
+          stage.turning = true;
+          turnSettle.restart();
+          stage.applyFollow();
+        }
+
+        // 1:1. The content moves with the input, which is the whole difference
+        // between this and an accumulator.
+        //
+        // The travel is clamped to one page BEFORE it is applied, which is what
+        // the engine's own `M.follow` does (`clamp(travel / dist, -1, 1)`): the
+        // gesture's raw travel is kept for the decision, but the pixel it is
+        // allowed to reach is one page either side of where the fingers started.
+        // Clamping the VIEW instead -- to the first and last page -- let a long
+        // flick, which really does travel several pages' worth of units, run the
+        // content to the last page while the fingers were still moving.
+        function applyFollow() {
+          const w = stage.pageWidth();
+          const progress = Math.max(-1, Math.min(1, stage.travel / root.paging.dist));
+          pages.contentX = Math.max(0, Math.min(stage.maxContentX(),
+                                               pages.currentIndex * w - progress * w));
+        }
+
+        // The release. Decided by where the motion WOULD have come to rest
+        // rather than by where it stopped: the engine's projection, then its
+        // half-over rule, its flick rule and its travel floor.
+        function gestureRelease(nowMs) {
+          if (!stage.gestureActive)
+            return;
+          stage.gestureActive = false;
+
+          // The stretch between the last motion and the release counts as no
+          // motion: a hand that came to rest before letting go must not commit
+          // on stale velocity. (The compositor half does exactly this in
+          // `onFinish`; here the release is inferred from a quiet stream, so the
+          // same decay is what makes the inference honest.)
+          let v = stage.velocity;
+          if (stage.lastEventMs > 0 && nowMs > stage.lastEventMs)
+            v = MM.approach(v, 0, nowMs - stage.lastEventMs, root.paging.window);
+
+          const w = stage.pageWidth();
+          const stay = () => stage.settleTo(pages.currentIndex * w, false);
+
+          const projected = MM.projectDelta(stage.travel, v, root.paging.decel);
+          if (MM.decide(stage.travel, projected, stage.peak, root.paging) === "stay") {
+            stay();
+            return;
+          }
+
+          // The direction is the SIGN OF THE PROJECTION, not of where the
+          // fingers stopped -- the engine's `decide` returns its verdict by the
+          // same rule. Positive travel is the previous page.
+          const want = pages.currentIndex + (projected > 0 ? -1 : 1);
+          if (want < 0 || want > root.pageCount - 1) {
+            stay();
+            return;
+          }
+          // The decision is latched for the length of the tail, and the settle
+          // is the machine's own: 100 x speed ms on `momentumSettle`.
+          stage.locked = true;
+          lockTimer.restart();
+          stage.settleTo(want * w, true);
+        }
+
+        // `turning` is on for a committed turn and off for a spring-back: the
+        // hover guard exists to stop a moving page feeding the selection, and a
+        // page that is only going back where it came from is not arriving
+        // anywhere.
+        function settleTo(targetX, committed) {
+          if (committed) {
+            stage.turning = true;
+            turnSettle.restart();
+          }
+          settleAnim.stop();
+          settleAnim.from = pages.contentX;
+          settleAnim.to = targetX;
+          settleAnim.duration = MM.settleMs(root.paging.speed);
+          settleAnim.start();
+        }
+
+        function finishSettle() {
+          const w = stage.pageWidth();
+          const idx = Math.max(0, Math.min(root.pageCount - 1, Math.round(pages.contentX / w)));
+          // The animation has already put the content where it belongs; these
+          // only publish where that is. NoSnap, so neither assignment moves
+          // anything -- the page index is what the dots and the selection read.
+          pages.contentX = idx * w;
+          pages.currentIndex = idx;
+          stage.travel = 0;
+          stage.velocity = 0;
+          stage.peak = 0;
+          stage.lastEventMs = 0;
+          stage.gestureActive = false;
+        }
+
+        // A discrete turn: the keyboard, the dots, or the selection walking off
+        // the edge of a page. No gesture behind it, so no decision -- straight to
+        // the engine's settle, which is the same motion a committed swipe ends
+        // with.
         function goTo(index) {
           const want = Math.max(0, Math.min(index, root.pageCount - 1));
           if (want === pages.currentIndex)
             return;
-          stage.turning = true;
-          turnSettle.restart();
-          pages.currentIndex = want;
+          stage.settleTo(want * stage.pageWidth(), true);
         }
 
-        // Paging is driven explicitly rather than by letting the ListView free-
-        // drag: with SnapOneItem + StrictlyEnforceRange a drag has to cross half
-        // a page to commit, which on a 5K screen means a huge sweep -- anything
-        // less slid a little and sprang back.
-        //
-        // A touchpad two-finger scroll arrives as a burst of small wheel events,
-        // so they are accumulated and a page turns once the total passes one
-        // notch; the accumulator resets on each turn so one long swipe does not
-        // skip several pages.
-        property real wheelAccumulated: 0
-        // Set the moment a page turns, cleared only once the scrolling has been
-        // quiet for a beat. One physical swipe = one page: a touchpad keeps
-        // firing events through the whole gesture, and without this the tail of
-        // a single flick kept re-crossing the threshold and ran to the last page.
-        property bool paging: false
-
-        // Short, because it only has to outlast the turn itself now that the
-        // momentum tail no longer keeps pushing it out.
-        Timer {
-          id: pagingCooldown
-          interval: 180
-          onTriggered: stage.paging = false
-        }
-
-        // A touchpad flick does not stop when the fingers lift: libinput keeps
-        // sending decaying kinetic events for up to a second afterwards. Those
-        // were restarting the cooldown over and over, so the lock outlived the
-        // gesture by a long way and a second swipe landed on nothing. Only
-        // events big enough to be a finger still driving extend it.
-        readonly property real momentumFloor: 15
-
+        // A wheel event is already in units of travel: `unitsPerPage` is what
+        // one page of finger travel arrives as. The old code accumulated these
+        // to exactly this number before jumping a page; the number is the same,
+        // the page just moves now instead of waiting.
         function scrolled(delta) {
           // Paging stays live in edit mode -- macOS pages while jiggling, and
           // blocking it would mean you can only remove apps from whichever page
@@ -1079,26 +1302,46 @@ Item {
           if (root.pageCount <= 1 || root.uninstallTarget)
             return;
 
-          // Still inside the gesture that already turned a page: swallow the
-          // rest of it, and keep pushing the cooldown out until the finger stops.
-          if (stage.paging) {
-            stage.wheelAccumulated = 0;
-            if (Math.abs(delta) >= stage.momentumFloor)
-              pagingCooldown.restart();
+          const pages_ = delta / root.paging.unitsPerPage;
+          if (stage.locked) {
+            // Inside the tail of a gesture that has already decided. Swallow it,
+            // and only let something still driving hold the lock open.
+            if (Math.abs(pages_) >= root.paging.force)
+              lockTimer.restart();
             return;
           }
+          releaseTimer.restart();
+          stage.gestureFeed(pages_, Date.now());
+        }
 
-          stage.wheelAccumulated += delta;
-          if (stage.wheelAccumulated <= -120)
-            stage.goTo(pages.currentIndex + 1);
-          else if (stage.wheelAccumulated >= 120)
-            stage.goTo(pages.currentIndex - 1);
-          else
-            return;
+        // The release of an input that has no end event of its own: a wheel
+        // stream simply stops. Short enough to feel immediate, long enough to sit
+        // between the events of one burst (the touchpad's tail arrives at about
+        // 8ms spacing).
+        Timer {
+          id: releaseTimer
+          interval: 90
+          onTriggered: stage.gestureRelease(Date.now())
+        }
 
-          stage.wheelAccumulated = 0;
-          stage.paging = true;
-          pagingCooldown.restart();
+        // Outlasts the kinetic tail of the gesture that just committed -- the
+        // value the old paging cooldown had tuned, for the same reason.
+        Timer {
+          id: lockTimer
+          interval: 250
+          onTriggered: stage.locked = false
+        }
+
+        NumberAnimation {
+          id: settleAnim
+          target: pages
+          property: "contentX"
+          // The machine's settle: the same four control points `looknfeel.lua`
+          // hands Hyprland for `workspaces`, taken from the engine so the two
+          // cannot drift.
+          easing.type: Easing.Bezier
+          easing.bezierCurve: MM.BEZIER
+          onFinished: stage.finishSettle()
         }
 
         // Two handlers, because WheelHandler.orientation defaults to Qt.Vertical
@@ -1116,34 +1359,52 @@ Item {
           onWheel: event => stage.scrolled(event.angleDelta.y)
         }
 
-        // Click-and-drag / touch swipe: commit on release once the drag has gone
-        // a twelfth of the screen, instead of half a page.
+        // Click-and-drag / finger drag. The page follows the pointer 1:1 -- a
+        // page of pointer travel moves the page a page -- and the release is the
+        // same release: half a page travelled, or a projection that would have
+        // carried it there.
+        //
+        // No flick path here, and that is deliberate rather than an omission:
+        // `force` is a per-EVENT delta, and the number in `root.paging` was
+        // measured on the touchpad's event stream (which reports at libinput's
+        // rate). A pointer's events have no such calibration, so the drag commits
+        // on travel and projection only.
         DragHandler {
           id: swipe
           target: null
           yAxis.enabled: false
-          property real startX: 0
+          enabled: root.uninstallTarget === null
+          property real lastX: 0
           onActiveChanged: {
             if (active) {
-              startX = centroid.position.x;
+              lastX = centroid.position.x;
+              stage.gestureStart(Date.now());
               return;
             }
-            if (root.uninstallTarget)
+            stage.gestureRelease(Date.now());
+          }
+          onCentroidChanged: {
+            if (!active || !stage.gestureActive)
               return;
-            const dx = centroid.position.x - startX;
-            const threshold = stage.width / 12;
-            if (dx <= -threshold)
-              stage.goTo(pages.currentIndex + 1);
-            else if (dx >= threshold)
-              stage.goTo(pages.currentIndex - 1);
+            const now = Date.now();
+            const dx = centroid.position.x - lastX;
+            lastX = centroid.position.x;
+            stage.gestureFeed(dx / stage.pageWidth(), now);
           }
         }
 
         // --- search pill ------------------------------------------------------
         Rectangle {
           id: searchPill
-          width: Math.round(panel.screenW * 0.13)
-          height: Math.round(panel.searchBand * 0.27)
+          // One column wide, which is what macOS's own Launchpad search field
+          // measures (Apple's help screenshot: about 1.1 column pitches), and
+          // against the icon pitch rather than the screen -- so it stays the
+          // same width as an icon column on any display.
+          width: Math.round(panel.cellW)
+          // From the screen, NOT from the band: the band is now only 9.5% tall
+          // and a pill derived from it would have shrunk with it. 3.5% of the
+          // height is a 32px pill on a 900px screen, which is what macOS has.
+          height: Math.round(panel.screenH * 0.035)
           radius: height / 2
           anchors.horizontalCenter: parent.horizontalCenter
           y: Math.round(panel.searchBand * 0.34)
@@ -1187,22 +1448,26 @@ Item {
               target: root
               function onResetRequested() {
                 search.text = "";
-                // JUMP TO PAGE ONE, do not slide to it. The ListView animates a
-                // currentIndex change over highlightMoveDuration, which is
-                // exactly right when you turn a page and exactly wrong here: a
-                // grid closed on page three mapped showing page three and then
-                // slid across to page one in front of you. The reset was
-                // correct, it was just happening where you could watch it.
+                // JUMP TO PAGE ONE, do not slide to it. The engine owns the
+                // view's position now, so this is two assignments -- and there
+                // is no view animation left to zero around them. There used to
+                // be: a grid closed on page three mapped showing page three and
+                // then slid across to page one in front of you.
                 //
-                // Zeroed around the assignment rather than bound to `shown`,
-                // because this also runs on the path where the grid is already
-                // up -- summoned again while a close is still running -- and
-                // there `shown` is true.
-                const move = pages.highlightMoveDuration;
-                pages.highlightMoveDuration = 0;
+                // The gesture's state is cleared with it, because a plugin that
+                // stays mounted keeps whatever the last swipe left behind, and a
+                // stale velocity is a decision waiting to be made about a page
+                // the user has not touched.
+                settleAnim.stop();
+                stage.gestureActive = false;
+                stage.locked = false;
+                stage.travel = 0;
+                stage.velocity = 0;
+                stage.peak = 0;
+                stage.lastEventMs = 0;
+                stage.turning = false;
                 pages.currentIndex = 0;
-                pages.positionViewAtBeginning();
-                Qt.callLater(function() { pages.highlightMoveDuration = move; });
+                pages.contentX = 0;
                 search.forceActiveFocus();
               }
             }
@@ -1302,9 +1567,16 @@ Item {
           height: panel.gridH
 
           orientation: ListView.Horizontal
-          snapMode: ListView.SnapOneItem
-          highlightRangeMode: ListView.StrictlyEnforceRange
-          highlightMoveDuration: 220
+          // NoSnap / NoHighlightRange, deliberately: this view is a viewport
+          // now, and the engine owns where it is. Both of the snapping modes it
+          // used to carry work against that -- SnapOneItem plus
+          // StrictlyEnforceRange makes the view pull itself back to the current
+          // item whenever that item is not comfortably in range, which is
+          // exactly what a page being held half way between two of them is.
+          // Paging was already driven explicitly (`interactive: false`); what is
+          // new is that the position is driven explicitly too.
+          snapMode: ListView.NoSnap
+          highlightRangeMode: ListView.NoHighlightRange
 
           // The page and the selection stay on the same screen, in both
           // directions: moving the selection off the edge of a page turns it,
@@ -1596,7 +1868,10 @@ Item {
             model: root.pageCount
             delegate: Rectangle {
               required property int index
-              width: Math.max(6, Math.round(panel.dotsBand * 0.11))
+              // From the screen, not the band: the band shrank with the layout
+              // and 0.11 of it is now under the 6px floor. 0.9% of the height
+              // is a 9px dot on a 900px screen, which is macOS's size.
+              width: Math.max(6, Math.round(panel.screenH * 0.009))
               height: width
               radius: width / 2
               color: index === pages.currentIndex ? Qt.rgba(1, 1, 1, 0.95) : Qt.rgba(1, 1, 1, 0.35)

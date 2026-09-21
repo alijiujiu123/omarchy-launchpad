@@ -594,3 +594,122 @@ all, not what it samples.
 That also explains why `decoration:blur:new_optimizations = false` never helped:
 it has nothing to do with stencil invalidation. **The earlier note was treating
 a symptom of somebody else's bug as a constraint on this design.**
+
+## 24. Paging is a gesture, not an accumulator
+
+The first version of paging summed `angleDelta` until it passed 120 and then
+jumped a whole page, with a cooldown latch to stop the tail turning several. It
+worked, and it felt nothing like the machine's own gestures: measured against
+the three-finger workspace swipe — which follows the fingers 1:1 and decides on
+release by where the motion *would* have come to rest — it was the same job with
+none of the feel.
+
+It now runs the kit's motion engine (`~/.config/omarchy/motion/`, the `motion`
+module of `omarchy-setup-kit`), imported as a **relative JS import**
+(`import "../../motion/MotionMath.js" as MM`) because Quickshell's package tree
+is read-only and blackholes everything outside it. The numbers that matter:
+
+| quantity | value | where it comes from |
+| --- | --- | --- |
+| `unitsPerPage` | 120 | 1500 compositor units (the workspace swipe's `distance`) × `scroll_factor` 0.08 — the same 120 the accumulator was tuned to, arrived at from the compositor side |
+| `dist` | 1.0 page | travel is kept in pages, so both inputs share one set of thresholds |
+| `cancel` | 0.5 | the half-over rule |
+| `force` | 0.125 page | 15 client units per *event* — the value `momentumFloor` had measured as "a finger still driving" |
+| `decel` | 200 pages/s² | a touchpad flick measures ~15.6 pages/s and projects 0.61 pages, so a flick commits and a moderate swipe (3.3 pages/s → 0.03) does not |
+| `floor` | 0.1 page | a tenth of a page, the engine's own proportion (60 of its centre's 600) |
+| `speed` | 5 | 100 × 5 = 500 ms on `momentumSettle` — `looknfeel.lua`'s value for `workspaces` |
+
+**The follow clamps the travel, not the view.** The engine's `M.follow` is
+`clamp(travel / dist, -1, 1)` and the first version of this code clamped
+`contentX` to the first and last page instead. A touchpad flick really does
+travel several pages' worth of units (6000 units/s is four screen-widths a
+second, measured on this machine for the workspace swipe), so a long flick ran
+the content to the *last* page while the fingers were still moving, and only the
+commit brought it back to one. Verified by simulating the state machine against
+a flick before touching the real one — the two-line difference is the whole bug.
+
+**A client cannot see a release, so it infers one.** The compositor half gets
+`start`/`update`/`finish` from libinput; a plugin reading axis events only sees
+the stream stop. Two things follow, both from the engine's own rules:
+
+- the release is a 90 ms quiet gap, and the velocity is *decayed over that gap*
+  before the decision is made — exactly what the engine's `onFinish` does with
+  the time between the last motion and the release ("the stretch between the
+  last motion event and the release counts as no motion", so a hand that came to
+  rest before letting go does not commit on stale velocity);
+- the kinetic tail is treated as motion while it lasts (the page follows it) and
+  swallowed after a decision, with only events above the flick threshold holding
+  the lock open — the old `momentumFloor` argument, unchanged.
+
+**A pointer drag has no flick rule** and that is deliberate rather than an
+omission: `force` is a per-event quantity measured on the touchpad's stream
+(which reports at libinput's rate); a pointer's events have no such calibration,
+so a drag commits on travel or projection. A mouse wheel does not need one — one
+detent is 120 units, i.e. exactly one page — so the mouse pages a notch at a time.
+
+## 25. `NoSnap`, and why the view had to stop being authoritative
+
+`SnapOneItem` + `StrictlyEnforceRange` is what the 6 × 5 version carried, and it
+fights a page that is deliberately being held half way between two of them:
+`StrictlyEnforceRange` moves the view whenever the current item is not
+comfortably in range, which is precisely the state a 1:1 follow puts it in. The
+view is now a plain viewport — `NoSnap`, `NoHighlightRange`, `interactive: false`
+— and the engine owns `contentX`.
+
+Worth pairing with finding 17 (`cacheBuffer: 0` livelocks this ListView): that
+livelock was `StrictlyEnforceRange` with no cache buffer to satisfy it, so the
+same two properties are implicated in both. They are gone now.
+
+The reset path lost its dance with it. It used to zero `highlightMoveDuration`
+around `currentIndex = 0` so the view would not *slide* from page three to page
+one on open (a close on page three mapped showing page three and then travelled
+across it). With no snapping and no view animation, page one is two assignments.
+
+## 26. Seven columns, measured against macOS's own screenshot
+
+The shape changed from 6 × 5 to 7 × 5, and the numbers came from Apple rather
+than from taste. Apple's Launchpad help page ships a screenshot of it
+(`help.apple.com/assets/.../3303d1afe4f90199376c4255f155ec65.png`, also in the
+Wayback Machine): **seven columns, five rows**, a search field about one column
+wide at the top, page dots at the bottom, and the Dock left visible. Measuring
+the icons against the column pitch in that image gives **icon ≈ 0.70 of pitch**
+(pitch ≈ 105 px, icons ≈ 75 px), which is the number that matters — it is
+scale-free, and it is what "the icons read as a page rather than as a sparse
+list" actually means.
+
+Ours was 0.42 (89 px icons in a 211 px cell at 1440 × 900), because six columns
+on a 16:10 panel makes every cell wider than it is tall: 211 × 144. Seven columns
+at the same height gives 195 × 154 — within 10% of square — and the icon becomes
+0.55 of the pitch. It cannot reach 0.70: the remaining 45% is the label and the
+gap under it, and five rows on a 16:10 panel do not leave room for a
+macOS-sized icon *and* a readable name (and Linux `.desktop` names are longer
+than macOS's). On a 16:9 panel the cells are wider still, so the icon is
+height-bound there: 129 px in a 260 px cell, 0.49 of the pitch.
+
+The other half of the change is the frame: `sidePad` 6% → 2.5%, `searchBand`
+13% → 9.5%, `dotsBand` 7% → 5%. Twenty percent of the height had been reserved
+for a 32 px pill and an 8 px row of dots, and every point of it goes into
+`cellH`, which is what caps the icon. The search pill and the dots are now sized
+from the screen rather than from the bands they sit in (a band that shrinks
+would otherwise have shrunk them too).
+
+## 27. macOS today has no Launchpad at all
+
+Checked before copying its layout, and worth recording because the conclusion
+changes what "match macOS" can mean: **macOS 26 removed Launchpad.** It was
+replaced by an App-Library-style *Applications* view inside Spotlight — category
+sections (Suggested, Utilities, Productivity & Finance, …) with a `…` menu that
+switches Grid/List, 5 columns in 26.0 becoming 7 in 26.1, no page dots, no page
+*of its own* to turn, no uninstall and no right-click. Spotlight itself is a
+window that can be repositioned and resized, so the stock app browser today is
+not a full-screen page of icons at all.
+
+The full-screen page with dots over a blurred wallpaper — what this plugin
+implements — is therefore the **classic** Launchpad, current up to macOS 15 and
+documented in Apple's archived guide (`use-launchpad-to-view-and-open-apps`,
+Wayback). Its gesture survived the removal with the same meaning: Apple's current
+Multi-Touch gestures page lists "**Apps** — pinch your thumb and three fingers
+together to show your installed apps", which is the direction
+`install/gestures.lua` already registers (fingers together open). The spreading
+half is this plugin's own: on macOS, spreading thumb and three fingers is *Show
+Desktop*, not "close the app grid".
