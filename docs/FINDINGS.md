@@ -745,33 +745,63 @@ around `currentIndex = 0` so the view would not *slide* from page three to page
 one on open (a close on page three mapped showing page three and then travelled
 across it). With no snapping and no view animation, page one is two assignments.
 
-## 26. Seven columns, measured against macOS's own screenshot
+## 26. Measuring Launchpad's geometry off Apple's own screenshot
 
-The shape changed from 6 × 5 to 7 × 5, and the numbers came from Apple rather
-than from taste. Apple's Launchpad help page ships a screenshot of it
+The shape changed from 6 × 5 to 7 × 5 and the frame was then re-measured twice,
+and both rounds taught the same lesson: **a screenshot you do not know the
+framing of is not a measurement.**
+
+**Round one, wrong.** Apple's Launchpad help page ships a screenshot of it
 (`help.apple.com/assets/.../3303d1afe4f90199376c4255f155ec65.png`, also in the
-Wayback Machine): **seven columns, five rows**, a search field about one column
-wide at the top, page dots at the bottom, and the Dock left visible. Measuring
-the icons against the column pitch in that image gives **icon ≈ 0.70 of pitch**
-(pitch ≈ 105 px, icons ≈ 75 px), which is the number that matters — it is
-scale-free, and it is what "the icons read as a page rather than as a sparse
-list" actually means.
+Wayback Machine). Read naively it is 932 × 758 — an aspect of 1.23, which no Mac
+screen has — so it is annotated and cropped, and percentages taken against *that*
+frame are not percentages of a screen. What survives cropping is anything internal
+*within* the picture: the number of columns, and the icon-to-pitch ratio. The
+column count was trustworthy (7 × 5), the honest read of the ratio was "about
+0.6", and the margins were not measurable at all.
 
-Ours was 0.42 (89 px icons in a 211 px cell at 1440 × 900), because six columns
-on a 16:10 panel makes every cell wider than it is tall: 211 × 144. Seven columns
-at the same height gives 195 × 154 — within 10% of square — and the icon becomes
-0.55 of the pitch. It cannot reach 0.70: the remaining 45% is the label and the
-gap under it, and five rows on a 16:10 panel do not leave room for a
-macOS-sized icon *and* a readable name (and Linux `.desktop` names are longer
-than macOS's). On a 16:9 panel the cells are wider still, so the icon is
-height-bound there: 129 px in a 260 px cell, 0.49 of the pitch.
+**Round two, and the trick that makes it measurable.** Several macOS versions
+each ship their own copy of that image, at different heights (931 × 739 for Big
+Sur 11, 932 × 740 for Ventura 13, 932 × 758 for Sequoia 15, 931 × 817 for Mojave
+10.14) and the *same* width — so the annotation strip is at the top and bottom,
+and the screen capture is a band in the middle. Finding it is a two-line test:
+rows that are mostly near-white are annotation, rows that are not are the screen.
+For 11 and 13 that band is `y 56…635`, i.e. **931 × 580 = 1.605 — a full 16:10
+screen**, and everything measured inside it is screen-relative.
 
-The other half of the change is the frame: `sidePad` 6% → 2.5%, `searchBand`
-13% → 9.5%, `dotsBand` 7% → 5%. Twenty percent of the height had been reserved
-for a 32 px pill and an 8 px row of dots, and every point of it goes into
-`cellH`, which is what caps the icon. The search pill and the dots are now sized
-from the screen rather than from the bands they sit in (a band that shrinks
-would otherwise have shrunk them too).
+What that band says (identical in both versions, which is why I trust it):
+
+| quantity | measurement |
+| --- | --- |
+| columns × rows | 7 × 5 |
+| column pitch | 116.3px on 931px = **12.5% of the screen width** |
+| row pitch | 90px on 580px = **15.5% of the screen height** |
+| grid's top | 9.3% of the height |
+| grid's bottom (last row) | 79.7% of the height |
+| page dots | 87.6% of the height |
+| Dock | 93–98% of the height, **visible over the page** |
+
+**What it cost us to get here.** The plugin had been laying its seven columns out
+across the whole usable width — 88.7% of the screen with 5.6% margins — which is
+wider and looser than the thing it copies, and "the two sides are wrong" was
+exactly that. The pitch is now a fraction of the *screen* (12.5%), the block is
+centred, and the margins fall out at 8.7%, which is what Apple's own layout
+produces. The same round also killed a wrong inference: the earlier version of
+this finding claimed the ratio was "0.70 of the pitch" from a first visual read of
+the cropped image, and a *third* read later (the width of the sharp content in an
+icon row) suggested 0.40 — the truth is somewhere in 0.55–0.62, so the code uses
+0.62 with the row as the bounding term, which is what the panel's height actually
+allows.
+
+**What is deliberately not copied: the vertical inset.** macOS's page stops at
+79.7% of the height because its Dock is visible from 93% down and the dots sit
+between. On this machine the Dock draws *underneath* the grid (its icons are a
+Top-level layer surface, the grid is an Overlay created later — see
+`omarchy-setup-kit`'s MANUAL-STEPS), so that fifth of the screen would be empty
+space. The rows are therefore the machine's own: 14.5% of the height for the pill
+and the dots, and the rest for five rows, which is what keeps the icon at 108px on
+a 1440 × 900 panel. Copying the vertical too would shrink the icons by ~20% to
+leave a gap where nothing is.
 
 ## 27. macOS today has no Launchpad at all
 

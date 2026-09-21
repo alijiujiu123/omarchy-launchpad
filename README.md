@@ -41,13 +41,17 @@ makes it read as Launchpad rather than as a generic app menu, and it is why
 there is one window per screen: a 5K monitor and a laptop panel each size their
 own grid instead of sharing one pixel-fixed icon size.
 
-Seven is not a preference: it is what macOS's own Launchpad draws on a laptop
-panel, measured off Apple's help screenshot for it (seven columns, five rows,
-icons about 0.7 of the column pitch). At six columns on a 1440 × 900 panel the
-cell was 211 × 144 and the icon could only be 42% of the pitch it sat in, which
-is what made the page read as a sparse grid floating in the middle of the screen
-with both margins empty; seven columns at the same height brings the cell within
-10% of square and the icon to 55% of the pitch.
+Seven columns, and the horizontal proportions, are macOS's own — measured off
+Apple's Launchpad help screenshots rather than guessed (the annotation border
+cropped off, what is left is a full 16:10 screen: 931 × 580, seven column centres
+116.3px apart on a 931px-wide screen). That is **12.5% of the screen per column**
+and, with the block of seven centred, **8.7% of the screen outside the outermost
+icons**. What the plugin did before was spread seven columns across the whole
+usable width — 88.7% of the screen with 5.6% margins — which is what "the two
+sides are wrong" was: the same icons laid out wider than the thing they copy,
+with the margins eaten. The rows stay this machine's own (macOS stops its page at
+79.7% of the height because its Dock occupies the bottom fifth; the Dock here is
+*behind* the grid, so that band would be empty space).
 
 ## Install
 

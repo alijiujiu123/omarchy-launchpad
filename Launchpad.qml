@@ -11,16 +11,15 @@
 // grid instead of sharing one pixel-fixed icon size. nwg-drawer was the first
 // attempt and could not do any of those three things.
 //
-// 7 x 5, and that is macOS's own shape on a laptop panel: Apple's help
-// screenshot of Launchpad measures seven columns, five rows, with the icons
-// about 0.70 of the column pitch. Six columns was what this plugin shipped with
-// first, and at 6 x 5 on a 1440 x 900 panel the cell is 211 x 144 -- so the
-// icon could only be 42% of the 211-wide pitch it sat in, and the page read as
-// a sparse grid floating in the middle of the screen with the margins either
-// side of it empty. Seven columns at the same height puts the cell much closer
-// to square (195 x 154) and the icon at 55% of the pitch, which is the most a
-// 16:10 screen allows once five rows, the search band and the dots have taken
-// their share. Bigger icons, closer together: that is what fills the page.
+// 7 x 5, and the horizontal proportions are macOS's own, measured off Apple's
+// Launchpad help screenshots -- see the geometry block in the panel for the
+// numbers and how they were read. In short: the columns sit 12.5% of the SCREEN
+// apart (not "as far apart as the space left over divides into seven"), the
+// block of seven is centred, and the margins that fall out of that are 8.7% at
+// each side. Six columns was what this plugin shipped with first, and at 6 x 5
+// on a 1440 x 900 panel the cell was 211 x 144 with the icon at 42% of its
+// pitch, which is what made the page read as a sparse grid with both margins
+// empty.
 //
 // This is an `overlay` plugin with keepLoaded: true, so the shell mounts it at
 // startup and it stays mounted. That is not a detail. An earlier standalone
@@ -865,35 +864,54 @@ Item {
       readonly property real screenH: panel.modelData ? panel.modelData.height : panel.height
 
       // Bands and margins, all as fractions of the screen so both monitors size
-      // their own page. What changed from the 6 x 5 layout, and why:
+      // their own page. The horizontal ones are MEASURED off macOS, the vertical
+      // ones are this machine's own (there is no Dock to leave room for here --
+      // see below).
       //
-      //   sidePad   6%  -> 2.5%. The macOS screenshot's outer margin and ours
-      //             were already the same order of magnitude; the emptiness was
-      //             never the margin, it was the icon-to-pitch ratio. Tightening
-      //             it further is what buys the extra pitch that makes the cells
-      //             near square.
-      //   searchBand 13% -> 9.5% and dotsBand 7% -> 5%. Twenty percent of the
-      //             height was reserved for a 32px pill and an 8px row of dots.
-      //             Every point taken back here goes into cellH, and cellH is
-      //             what caps the icon on a 16:10 panel.
-      readonly property real sidePad: Math.round(panel.screenW * 0.025)
+      //   searchBand 9.5% and dotsBand 5% — 14.5% of the height for the pill and
+      //             the page dots. Every point taken back here goes into cellH,
+      //             and cellH is what caps the icon on a 16:10 panel, which is
+      //             why the grid is deliberately taller than macOS's: Apple's
+      //             page stops at 79.7% of the screen height because the Dock
+      //             occupies 93-98%, and this machine's Dock is *behind* the
+      //             grid (it is a Top-level surface; the grid is an Overlay
+      //             created later), so that band would be empty space.
       readonly property real searchBand: Math.round(panel.screenH * 0.095)
       readonly property real dotsBand: Math.round(panel.screenH * 0.05)
-      readonly property real gridW: panel.screenW - sidePad * 2
       readonly property real gridH: panel.screenH - searchBand - dotsBand
-      readonly property real cellW: gridW / root.columns
       readonly property real cellH: gridH / root.rows
+      // THE COLUMN PITCH IS macOS's OWN, and it is a fraction of the SCREEN, not
+      // of the space left over. Measured from Apple's Launchpad help screenshots
+      // (Big Sur 11 and Ventura 13, both 931x580 — the annotated border cropped
+      // off, so what is left is a full 16:10 screen): the seven columns sit
+      // 116.3px apart on a 931px-wide screen, i.e. 12.5% of the width, which
+      // leaves 8.7% of the screen outside the outermost icons.
+      //
+      // This plugin used to spread the columns across the whole usable width
+      // instead — seven columns over 88.7% of the screen with 5.6% margins —
+      // and that is exactly what "the two sides are wrong" was: the same icons
+      // laid out 6% wider than the thing they are copying, with the margins
+      // eaten. The columns are now a fixed 12.5% wide and the block is centred,
+      // so the margins fall out of the screen size the way they do on macOS
+      // (8.7% of 1440 = 125px on the laptop panel, 8.7% of 1920 = 167px on the
+      // external one).
+      readonly property real pitch: Math.round(panel.screenW * 0.125)
+      readonly property real cellW: pitch
+      readonly property real gridW: pitch * root.columns
+      readonly property real sidePad: Math.max(0, Math.round((panel.screenW - gridW) / 2))
       // Both terms are live on this machine, which is what makes it stable
       // across screens rather than tuned to one: on a 1440 x 900 panel
-      // (cellW 195, cellH 154) the width term wants 107 and the height term
-      // wants 108, so the icon is 107 either way. The width term is what stops
-      // a very wide, short screen from making cells wider than they are tall.
+      // (cellW 180, cellH 154) the width term wants 112 and the height term
+      // wants 108, so the icon is 108 either way — the same size it was when the
+      // pitch was wider, because it is the ROW that bounds it, not the column.
+      // The width term is what stops a very wide, short screen from making cells
+      // wider than they are tall.
       //
-      // 0.55 of the pitch, against macOS's 0.70: the rest of that ratio is the
-      // label and the gap under it. Five rows on a 16:10 panel do not leave
-      // room for both a macOS-sized icon and its name -- and the name is worth
-      // more here, because Linux entries are longer than macOS's.
-      readonly property int iconSize: Math.max(32, Math.round(Math.min(cellW * 0.55, cellH * 0.70)))
+      // 0.62 of the pitch is macOS's own proportion between icon and pitch (the
+      // same reading as above), and 0.70 of the row is the name and the gap under
+      // it: five rows on a 16:10 panel do not leave room for a macOS-sized icon
+      // *and* a readable label, and Linux entry names are longer than macOS's.
+      readonly property int iconSize: Math.max(32, Math.round(Math.min(cellW * 0.62, cellH * 0.70)))
       readonly property int labelSize: Math.max(10, Math.round(iconSize * 0.15))
       // NO wallpaper image, and no blur of our own. The compositor blurs
       // whatever is actually behind this surface -- windows included -- which is
