@@ -595,7 +595,7 @@ That also explains why `decoration:blur:new_optimizations = false` never helped:
 it has nothing to do with stencil invalidation. **The earlier note was treating
 a symptom of somebody else's bug as a constraint on this design.**
 
-## 24. Paging is a gesture, not an accumulator
+## 24. Paging is a gesture, not an accumulator — and the units are not what you think
 
 The first version of paging summed `angleDelta` until it passed 120 and then
 jumped a whole page, with a cooldown latch to stop the tail turning several. It
@@ -607,45 +607,77 @@ none of the feel.
 It now runs the kit's motion engine (`~/.config/omarchy/motion/`, the `motion`
 module of `omarchy-setup-kit`), imported as a **relative JS import**
 (`import "../../motion/MotionMath.js" as MM`) because Quickshell's package tree
-is read-only and blackholes everything outside it. The numbers that matter:
+is read-only and blackholes everything outside it. Since this path reads its own
+input, `MotionMath.js` also grew the release decision (`decide`), which the
+compositor half owns for a gesture it can see end.
 
-| quantity | value | where it comes from |
+**The first attempt at the numbers was wrong, and the way it was wrong is the
+finding.** They were *derived*: one page = 1500 compositor units x
+`scroll_factor` (0.08) = 120 client units, which is also where the old
+accumulator's 120 came from. Installed, paging turned a page on a touch. The
+reason is that `angleDelta` is **not** the compositor's delta: Qt reports a
+trackpad's continuous axis events about an order of magnitude larger, and the
+"client units" quoted in this machine's own notes (hypr-scroll-momentum's
+600-5000/s for a flick) are the compositor's. So 120 units per page was 6% of a
+real swipe, and half a page was two events.
+
+The fix was to **record the real stream** rather than reason about it: a
+temporary log in the wheel path (delta, gap, total, peak per gesture, written
+through a `FileView` — no fork per event), three reference gestures by hand, and
+a simulation of the recorded streams through the same algebra before touching
+the parameters. What a trackpad actually produces:
+
+| gesture | travel | per-event peak |
 | --- | --- | --- |
-| `unitsPerPage` | 120 | 1500 compositor units (the workspace swipe's `distance`) × `scroll_factor` 0.08 — the same 120 the accumulator was tuned to, arrived at from the compositor side |
-| `dist` | 1.0 page | travel is kept in pages, so both inputs share one set of thresholds |
-| `cancel` | 0.5 | the half-over rule |
-| `force` | 0.125 page | 15 client units per *event* — the value `momentumFloor` had measured as "a finger still driving" |
-| `decel` | 200 pages/s² | a touchpad flick measures ~15.6 pages/s and projects 0.61 pages, so a flick commits and a moderate swipe (3.3 pages/s → 0.03) does not |
-| `floor` | 0.1 page | a tenth of a page, the engine's own proportion (60 of its centre's 600) |
-| `speed` | 5 | 100 × 5 = 500 ms on `momentumSettle` — `looknfeel.lua`'s value for `workspaces` |
+| a light short touch | 61 units | 40 |
+| a quick short swipe | 677 | 131 |
+| a normal swipe, "one page" | 1974 | 58 |
+| a deliberate flick | 1188–4653 | 244–535 |
 
-**The follow clamps the travel, not the view.** The engine's `M.follow` is
-`clamp(travel / dist, -1, 1)` and the first version of this code clamped
-`contentX` to the first and last page instead. A touchpad flick really does
-travel several pages' worth of units (6000 units/s is four screen-widths a
-second, measured on this machine for the workspace swipe), so a long flick ran
-the content to the *last* page while the fingers were still moving, and only the
-commit brought it back to one. Verified by simulating the state machine against
-a flick before touching the real one — the two-line difference is the whole bug.
+which sets every threshold, with the margin on the measured side of each gap:
 
-**A client cannot see a release, so it infers one.** The compositor half gets
-`start`/`update`/`finish` from libinput; a plugin reading axis events only sees
-the stream stop. Two things follow, both from the engine's own rules:
+| quantity | value | from |
+| --- | --- | --- |
+| `unitsPerPage` | 2000 | the reference swipe (1974) — one page is what a deliberate swipe to turn one page accumulates |
+| `cancel` | 0.5 | the half-over rule: 1000 units, above a light touch and a quick short swipe, below the reference and every flick |
+| `force` | 150 units/event (0.075 page) | between ordinary gestures (peaks 40-131) and flicks (244-535) |
+| `floor` | 200 units (0.1 page) | the engine's own proportion; a light touch is then not a decision at all (it still follows 3% and springs back) |
+| `decel` | 300 pages/s² | a flick's measured 20-30 pages/s projects past half a page |
+| `window` / `speed` | 80 ms / 5 | the engine's window; the machine's settle speed (100 x 5 = 500 ms on `momentumSettle`, `looknfeel.lua`'s value for `workspaces`) |
 
-- the release is a 90 ms quiet gap, and the velocity is *decayed over that gap*
-  before the decision is made — exactly what the engine's `onFinish` does with
-  the time between the last motion and the release ("the stretch between the
-  last motion event and the release counts as no motion", so a hand that came to
-  rest before letting go does not commit on stale velocity);
-- the kinetic tail is treated as motion while it lasts (the page follows it) and
-  swallowed after a decision, with only events above the flick threshold holding
-  the lock open — the old `momentumFloor` argument, unchanged.
+**A mouse wheel is a different unit and needs its own normaliser.** One detent is
+120 `angleDelta` on the nose, while a trackpad swipe accumulates ~2000: the two
+devices report quantities that are not comparable, so `unitsFor(event.device)`
+picks 120 for `PointerDevice.Mouse` and 2000 for a trackpad. Neither is a fudge
+factor — each is converted to pages with the number measured for it.
 
-**A pointer drag has no flick rule** and that is deliberate rather than an
-omission: `force` is a per-event quantity measured on the touchpad's stream
-(which reports at libinput's rate); a pointer's events have no such calibration,
-so a drag commits on travel or projection. A mouse wheel does not need one — one
-detent is 120 units, i.e. exactly one page — so the mouse pages a notch at a time.
+Two more consequences of reading the input rather than being told about it:
+
+- **The follow clamps the travel, not the view.** The engine's `M.follow` is
+  `clamp(travel / dist, -1, 1)`; the first version of this code clamped
+  `contentX` to the first and last page instead. A touchpad flick really does
+  travel several pages' worth of units (the measured flicks: 2.3 pages), so a
+  long flick ran the content to the *last* page while the fingers were still
+  moving, and only the commit brought it back to one. Found by simulating the
+  state machine against a flick before touching the real one.
+- **A client cannot see a release, so it infers one.** The compositor half gets
+  `start`/`update`/`finish` from libinput; a plugin reading axis events only sees
+  the stream stop. The release is therefore a 90 ms quiet gap and the velocity is
+  *decayed over that gap* before the decision — exactly what the engine's
+  `onFinish` does with the time between the last motion and the release, so a
+  hand that came to rest before letting go does not commit on stale velocity.
+  The consequence is that the *projection* rarely decides on this path (a decay
+  of e^(-90/80) = 0.32 kills most of the velocity), and the **peak** carries the
+  flick intent instead: it is the client's honest stand-in for a release the
+  compositor would have seen.
+- **The kinetic tail is followed and then swallowed**, with only events above the
+  flick threshold holding the lock open after a decision — the old
+  `momentumFloor` argument, unchanged, now expressed as the engine's `force`.
+
+**A pointer drag has no flick rule**, deliberately rather than by omission:
+`force` is a per-event quantity measured on the touchpad's stream (which reports
+at libinput's rate); a pointer's events have no such calibration, so a drag
+commits on travel or projection — half a page of pointer travel.
 
 ## 25. `NoSnap`, and why the view had to stop being authoritative
 

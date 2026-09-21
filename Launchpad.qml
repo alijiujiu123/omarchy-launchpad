@@ -146,38 +146,75 @@ Item {
   // rule) mean "half a page" for a two-finger scroll and for a pointer drag
   // alike, without either of them needing its own thresholds.
   //
-  //   dist  1.0        — one page, because travel is already in pages
-  //   cancel 0.5       — the half-over rule, the engine's default and what
-  //                      Hyprland's own workspace swipe falls back to
-  //   force  0.125     — one event moving an eighth of a page may decide on its
-  //                      own (the flick rule). That is 15 client units/event,
-  //                      which is what this plugin's `momentumFloor` measured
-  //                      as "a finger still driving" rather than a kinetic tail
-  //   decel  200       — pages/s^2. A touchpad flick measures ~15.6 pages/s, so
-  //                      it projects 0.61 pages and commits; a moderate swipe
-  //                      (3.3 pages/s) projects 0.03 and does not, which is the
-  //                      same split the workspace swipe has
-  //   window 80        — ms, the recency-weighted velocity window
-  //   floor  0.1       — a tenth of a page, the engine's proportion (60 of its
-  //                      centre's 600): below that nothing counts as a decision
-  //   speed  5         — the machine's settle speed: 100 x 5 = 500ms on the
-  //                      `momentumSettle` bezier, exactly what `looknfeel.lua`
-  //                      gives `workspaces`, so a page turn and a workspace
-  //                      swipe settle in the same time over the same distance
-  //   unitsPerPage 120 — client angleDelta in one page: 1500 compositor units
-  //                      (the workspace swipe's `distance`) x `scroll_factor`
-  //                      0.08. The number this plugin had already tuned as its
-  //                      wheel notch, arrived at from the other direction
+  // MEASURED, not derived. `angleDelta` is not the compositor's delta: Qt
+  // reports a trackpad's continuous axis events as angleDelta units about an
+  // order of magnitude larger, and hypr-scroll-momentum's "client units" (which
+  // this machine's own notes quote) are the compositor's. Guessing the scale is
+  // what made the first version of this paging turn a page on a touch, so the
+  // numbers below come from a recorded stream of real gestures (a temporary log
+  // in `scrolled()`, three reference gestures and a simulation of them):
+  //
+  //   gesture                        travel      per-event peak
+  //   a light short touch             61 units     40
+  //   a quick short swipe            677          131
+  //   a normal swipe, "one page"    1974           58
+  //   a deliberate flick        1188 - 4653   244 - 535
+  //
+  //   unitsPerPage 2000 — one page is what a deliberate swipe to turn one page
+  //               actually accumulates (1974 measured). The value this replaced
+  //               was 120, inherited from the old accumulator: 6% of a real
+  //               swipe, which is exactly why every touch committed.
+  //   dist       1.0 — one page, because travel is already in pages
+  //   cancel     0.5 — the half-over rule: half a page travelled commits, which
+  //               is 1000 units. A light touch (61) and a quick short swipe
+  //               (677) are below it; the reference swipe (1974) and every
+  //               flick are above it.
+  //   force      0.075 — one event moving 150 units may decide on its own (the
+  //               flick rule). That sits between the peaks of ordinary gestures
+  //               (40-131) and of deliberate flicks (244-535), so a flick
+  //               commits on the flick rule even when its travel is short.
+  //   floor      0.1 — a tenth of a page, the engine's proportion (60 of its
+  //               centre's 600): 200 units, so a light touch is not a decision
+  //               at all. It still follows — 3% of a page — and springs back.
+  //   decel      300 pages/s² — a flick's own speed (20-30 pages/s measured)
+  //               projects well past half a page even from a short travel. On
+  //               this path, though, the release is *inferred* from a quiet
+  //               stream, so the velocity has already decayed by the time it is
+  //               measured and the peak above carries most of the flick intent:
+  //               the client's honest stand-in for a release the compositor
+  //               would have seen.
+  //   window     80 — ms, the recency-weighted velocity window (events arrive
+  //               7-8ms apart, so this is about ten of them)
+  //   speed      5 — the machine's settle speed: 100 x 5 = 500ms on the
+  //               `momentumSettle` bezier, exactly what `looknfeel.lua` gives
+  //               `workspaces`, so a page turn and a workspace swipe settle in
+  //               the same time over the same distance
+  //   unitsPerPageWheel 120 — a MOUSE wheel is a different unit again: one
+  //               detent is 120 angleDelta on the nose, so a notch is a page.
+  //               Read per event (`event.device`), because the two devices
+  //               report quantities that are not comparable:
+  //               the choice is "a notch" vs "a movement"
   readonly property var paging: ({
     dist: 1.0,
     cancel: 0.5,
-    force: 0.125,
-    decel: 200,
+    force: 0.075,
+    decel: 300,
     window: 80,
     floor: 0.1,
     speed: 5,
-    unitsPerPage: 120
+    unitsPerPage: 2000,
+    unitsPerPageWheel: 120
   })
+
+  // What one page is, for the device that produced this event. A wheel detent
+  // arrives as 120 whatever the trackpad's scale is, so the wheel needs its own
+  // normaliser -- and it is not a fudge factor: the two are different
+  // quantities, and each is converted to "pages" with the number measured for it.
+  function unitsFor(device) {
+    return (device && device.type === PointerDevice.Mouse)
+      ? root.paging.unitsPerPageWheel
+      : root.paging.unitsPerPage
+  }
 
   // --- state --------------------------------------------------------------
   // Starts hidden. A plugin that shows itself on load flashes the whole grid
@@ -1291,18 +1328,19 @@ Item {
           stage.settleTo(want * stage.pageWidth(), true);
         }
 
-        // A wheel event is already in units of travel: `unitsPerPage` is what
-        // one page of finger travel arrives as. The old code accumulated these
-        // to exactly this number before jumping a page; the number is the same,
-        // the page just moves now instead of waiting.
-        function scrolled(delta) {
+        // A wheel event is already in units of travel, but *which* units depends
+        // on the device that produced it: a mouse wheel counts in detents (120
+        // to a notch) and a trackpad in movements about an order of magnitude
+        // larger. `unitsFor` normalises each to one page, so everything
+        // downstream stays in pages.
+        function scrolled(delta, device) {
           // Paging stays live in edit mode -- macOS pages while jiggling, and
           // blocking it would mean you can only remove apps from whichever page
           // you happened to be on. Only the modal dialog stops it.
           if (root.pageCount <= 1 || root.uninstallTarget)
             return;
 
-          const pages_ = delta / root.paging.unitsPerPage;
+          const pages_ = delta / root.unitsFor(device);
           if (stage.locked) {
             // Inside the tail of a gesture that has already decided. Swallow it,
             // and only let something still driving hold the lock open.
@@ -1346,17 +1384,18 @@ Item {
 
         // Two handlers, because WheelHandler.orientation defaults to Qt.Vertical
         // and silently drops horizontal wheel events -- which is why a sideways
-        // two-finger swipe did nothing while an up/down one paged fine.
+        // two-finger swipe did nothing while an up/down one paged fine. The
+        // device goes through with the delta, because the units do (`unitsFor`).
         WheelHandler {
           orientation: Qt.Horizontal
           acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-          onWheel: event => stage.scrolled(event.angleDelta.x)
+          onWheel: event => stage.scrolled(event.angleDelta.x, event.device)
         }
 
         WheelHandler {
           orientation: Qt.Vertical
           acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-          onWheel: event => stage.scrolled(event.angleDelta.y)
+          onWheel: event => stage.scrolled(event.angleDelta.y, event.device)
         }
 
         // Click-and-drag / finger drag. The page follows the pointer 1:1 -- a

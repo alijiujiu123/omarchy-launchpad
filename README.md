@@ -121,10 +121,28 @@ hand** — 1:1, not in jumps — and letting go decides where it lands:
   deceleration, `v²/2a`, on a recency-weighted velocity of the last few tens of
   milliseconds);
 - it commits if that projection crossed **half a page**, or if a single event
-  moved faster than one eighth of a page (the flick rule);
+  moved faster than **150 units** (the flick rule);
 - nothing counts below **a tenth of a page**, so a twitch is not a decision;
 - whatever does not commit springs back, and whatever does settles on the same
   curve and duration the three-finger workspace swipe uses.
+
+**The units are measured, not derived.** `angleDelta` is not the compositor's
+delta — Qt reports a trackpad's continuous axis events about an order of
+magnitude larger than Hyprland's — so the thresholds were placed after recording
+real gestures (a temporary log in the wheel path, three reference gestures, and
+a simulation of them):
+
+| gesture | travel | per-event peak |
+| --- | --- | --- |
+| a light short touch | 61 units | 40 |
+| a quick short swipe | 677 | 131 |
+| a normal swipe, "one page" | 1974 | 58 |
+| a deliberate flick | 1188–4653 | 244–535 |
+
+That is where **2000 units per page**, a **0.5 page** half-over (1000 units), a
+**150 unit** flick threshold and a **0.1 page** floor come from. Guessing them
+the first time is what made paging turn a page on a touch: the value inherited
+from the old accumulator was 120 units per page, which is 6% of a real swipe.
 
 That is the kit's motion engine, not a paging heuristic: `MotionMath.js` is
 imported from `~/.config/omarchy/motion/` (installed by the kit's `motion`
@@ -137,20 +155,18 @@ Two consequences worth knowing:
 
 - **One swipe is one page.** The page never runs further than one page ahead of
   where the fingers started, however hard the flick is; a second page needs a
-  second gesture.
-- **A wheel notch is a page.** One detent is 120 client units, which is exactly
-  one page of travel, so a mouse wheel pages one notch at a time (and, being a
-  single event above the flick threshold, commits immediately). A pointer drag
-  has no flick rule — that threshold is a per-event quantity and was measured on
-  the touchpad's event stream, which a pointer's events have no calibration for —
-  so a drag commits on travel or projection: half a page of pointer travel.
-
-A touchpad's kinetic tail — libinput keeps sending decaying events for up to a
-second after the fingers lift — is followed like any other motion, and then
-swallowed: once a gesture has decided, further events are ignored until the
-stream has been quiet for 250 ms, and only events large enough to be a finger
-still driving hold that shut. Without it, the tail of the swipe that just
-committed a page would decide a second one.
+  second gesture. A trackpad's kinetic tail is followed like any other motion and
+  then swallowed: once a gesture has decided, further events are ignored until
+  the stream has been quiet for 250 ms, and only events above the flick
+  threshold hold that shut — so one swipe cannot decide twice.
+- **A mouse wheel notch is a page, and a trackpad is not a wheel.** A detent is
+  120 `angleDelta` on the nose, while a deliberate trackpad swipe accumulates
+  about 2000 — the two devices report quantities that are not comparable, so
+  each is normalised with the number measured for it (`unitsPerPageWheel` vs
+  `unitsPerPage`, chosen per event from `event.device`). A pointer drag has no
+  flick rule — that threshold is a per-event quantity and was measured on the
+  touchpad's event stream, which a pointer's events have no calibration for — so
+  a drag commits on travel or projection: half a page of pointer travel.
 
 ### The selection and the page are one thing
 
