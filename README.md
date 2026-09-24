@@ -1,5 +1,11 @@
 # Launchpad
 
+> **Archived record — no longer maintained here.** Development moved on
+> 2026-09-24 to a private repository of ours; this copy stays as the record of
+> the work up to that point (see `docs/FINDINGS.md` for the paging and geometry
+> lessons). Upstream remains
+> [`AndyWeiBoan/omarchy-launchpad`](https://github.com/AndyWeiBoan/omarchy-launchpad).
+
 A macOS-style application grid for [Omarchy](https://omarchy.org), as a shell
 plugin.
 
